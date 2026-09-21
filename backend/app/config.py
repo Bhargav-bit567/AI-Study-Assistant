@@ -20,23 +20,30 @@ AZURE_OPENAI_ENDPOINT = os.getenv(
 # Model deployment name
 AZURE_MODEL_DEPLOYMENT = os.getenv("AZURE_MODEL_DEPLOYMENT", "gpt-5-mini")
 
-# Optional API Key (for API key authentication)
+# Azure API Key
 AZURE_AI_API_KEY = os.getenv("AZURE_AI_API_KEY", "")
 
 # Agent reference in Azure AI Foundry
 AZURE_AI_AGENT_NAME = os.getenv("AZURE_AI_AGENT_NAME", "AI-Study-Assistant")
 AZURE_AI_AGENT_VERSION = os.getenv("AZURE_AI_AGENT_VERSION", "2")
 
+# Supabase
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+
 
 def validate_config() -> None:
-    """Raise a clear error if required Azure settings are missing."""
+    """Raise a clear error if required settings are missing."""
     missing = []
     if not AZURE_AI_ENDPOINT:
         missing.append("AZURE_AI_ENDPOINT")
     if not AZURE_AI_AGENT_NAME:
         missing.append("AZURE_AI_AGENT_NAME")
-    if not AZURE_AI_AGENT_VERSION:
-        missing.append("AZURE_AI_AGENT_VERSION")
+    if not SUPABASE_URL:
+        missing.append("SUPABASE_URL")
+    if not SUPABASE_SERVICE_ROLE_KEY:
+        missing.append("SUPABASE_SERVICE_ROLE_KEY")
     if missing:
         raise RuntimeError(
             f"Missing required environment variables: {', '.join(missing)}. "
