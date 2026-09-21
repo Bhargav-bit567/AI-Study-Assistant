@@ -16,6 +16,20 @@
 - 📊 **Progress statistics** — View document count, generated results, quiz attempts, and average score.
 - ☁️ **Deployment-ready** — Includes a `render.yaml` configuration for Render deployment.
 
+## 🖥️ Screenshots
+
+### Index: upload study material
+
+![StudyPilot AI PDF upload screen](docs/screenshots/index-screen.png)
+
+### Generated study summary
+
+![StudyPilot AI generated summary](docs/screenshots/summary-screen.png)
+
+### Interactive MCQ quiz
+
+![StudyPilot AI interactive quiz](docs/screenshots/quiz-screen.png)
+
 ## 🏗️ Architecture
 
 The application follows a simple request pipeline:
