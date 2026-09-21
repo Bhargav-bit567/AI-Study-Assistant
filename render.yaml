@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: ai-study-assistant
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn backend.app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: AZURE_AI_ENDPOINT
+        sync: false
+      - key: AZURE_OPENAI_ENDPOINT
+        sync: false
+      - key: AZURE_AI_API_KEY
+        sync: false
+      - key: AZURE_AI_AGENT_NAME
+        sync: false
+      - key: AZURE_AI_AGENT_VERSION
+        sync: false
+      - key: AZURE_MODEL_DEPLOYMENT
+        sync: false
