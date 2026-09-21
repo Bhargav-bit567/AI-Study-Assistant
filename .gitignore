@@ -18,3 +18,8 @@ venv/
 
 # Logs
 *.log
+
+# Databases
+*.db
+*.sqlite3
+

@@ -6,3 +6,5 @@ azure-ai-projects>=2.7.0
 python-dotenv>=1.0.1
 pydantic>=2.7.0
 supabase>=2.4.0
+pypdf>=5.0.0
+pyjwt>=2.8.0

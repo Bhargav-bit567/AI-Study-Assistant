@@ -1,7 +1,8 @@
-"""FastAPI backend for AI Study Assistant with Supabase auth + history."""
+"""FastAPI backend for AI Study Assistant with Supabase & local auth + study history."""
 
 from __future__ import annotations
 
+import io
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -11,7 +12,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from .config import validate_config, SUPABASE_URL, SUPABASE_ANON_KEY
+from .config import validate_config
 from .foundry import FoundryClient
 from .models import (
     StudyResponse, AuthResponse, SignUpRequest, SignInRequest,
@@ -45,17 +46,11 @@ app.add_middleware(
 # ── Utility ───────────────────────────────────────────────────────────────────
 
 def _get_user_id(authorization: Optional[str]) -> Optional[str]:
-    """Extract user_id from Supabase JWT token. Returns None if not authenticated."""
+    """Extract user_id from token header. Returns None if not authenticated."""
     if not authorization or not authorization.startswith("Bearer "):
         return None
-    token = authorization.split(" ", 1)[1]
-    try:
-        from supabase import create_client
-        client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
-        user = client.auth.get_user(token)
-        return user.user.id if user and user.user else None
-    except Exception:
-        return None
+    token = authorization.split(" ", 1)[1].strip()
+    return db.verify_token(token)
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
@@ -71,47 +66,34 @@ async def health() -> dict:
 async def signup(body: SignUpRequest):
     """Register a new user."""
     try:
-        from supabase import create_client
-        client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
-        res = client.auth.sign_up({
-            "email": body.email,
-            "password": body.password,
-            "options": {"data": {"full_name": body.full_name}},
-        })
-        if not res.user:
-            raise HTTPException(status_code=400, detail="Sign up failed")
+        res = db.sign_up(body.email, body.password, body.full_name or "")
         return AuthResponse(
-            access_token=res.session.access_token if res.session else "",
-            user_id=res.user.id,
-            email=res.user.email,
+            access_token=res["access_token"],
+            user_id=res["user_id"],
+            email=res["email"],
         )
-    except HTTPException:
-        raise
-    except Exception as exc:
+    except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.error("Signup error: %s", exc)
+        raise HTTPException(status_code=400, detail="Sign up failed")
 
 
 @app.post("/api/auth/signin", response_model=AuthResponse)
 async def signin(body: SignInRequest):
     """Sign in an existing user."""
     try:
-        from supabase import create_client
-        client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
-        res = client.auth.sign_in_with_password({
-            "email": body.email,
-            "password": body.password,
-        })
-        if not res.user or not res.session:
-            raise HTTPException(status_code=401, detail="Invalid credentials")
+        res = db.sign_in(body.email, body.password)
         return AuthResponse(
-            access_token=res.session.access_token,
-            user_id=res.user.id,
-            email=res.user.email,
+            access_token=res["access_token"],
+            user_id=res["user_id"],
+            email=res["email"],
         )
-    except HTTPException:
-        raise
-    except Exception as exc:
+    except ValueError as exc:
         raise HTTPException(status_code=401, detail=str(exc))
+    except Exception as exc:
+        logger.error("Signin error: %s", exc)
+        raise HTTPException(status_code=401, detail="Invalid credentials")
 
 
 # ── Study endpoint ────────────────────────────────────────────────────────────
@@ -125,7 +107,7 @@ async def study(
     """Receive a PDF and generate summary or MCQs. Saves results if authenticated."""
     if not file.filename:
         raise HTTPException(status_code=400, detail="Missing filename")
-    if not file.content_type or "pdf" not in file.content_type.lower():
+    if not file.filename.lower().endswith(".pdf") and (not file.content_type or "pdf" not in file.content_type.lower()):
         raise HTTPException(status_code=400, detail="Only PDF files are supported")
 
     user_id = _get_user_id(authorization)
@@ -135,14 +117,10 @@ async def study(
         file_bytes = await file.read()
         file_size = len(file_bytes)
 
-        # Reset file pointer for FoundryClient
-        import io
-        file.file = io.BytesIO(file_bytes)
-
-        file_id = client.upload_pdf(file)
+        file_id = client.upload_pdf(file, file_bytes=file_bytes)
         result = client.run_study_agent(file_id=file_id, action=action)
     except RuntimeError as exc:
-        logger.error("Foundry error: %s", exc)
+        logger.error("Study analysis error: %s", exc)
         raise HTTPException(status_code=502, detail=str(exc))
     except Exception as exc:
         logger.error("Unexpected error: %s", exc, exc_info=True)
