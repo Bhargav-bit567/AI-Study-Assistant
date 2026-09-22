@@ -8,3 +8,4 @@ pydantic>=2.7.0
 supabase>=2.4.0
 pypdf>=5.0.0
 pyjwt>=2.8.0
+a2wsgi>=0.10.8
