@@ -25,3 +25,17 @@ services:
         sync: false
       - key: JWT_SECRET_KEY
         sync: false
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: SMTP_FROM
+        sync: false
+      - key: SMTP_STARTTLS
+        sync: false
+      - key: SMTP_LOGIN_NOTIFICATION_ENABLED
+        sync: false

@@ -57,7 +57,13 @@ def _get_user_id(authorization: Optional[str]) -> Optional[str]:
 
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "ok"}
+    from .config import IS_AZURE_CONFIGURED, IS_SUPABASE_CONFIGURED, IS_SMTP_CONFIGURED
+    return {
+        "status": "ok",
+        "azure_configured": IS_AZURE_CONFIGURED,
+        "supabase_configured": IS_SUPABASE_CONFIGURED,
+        "smtp_configured": IS_SMTP_CONFIGURED,
+    }
 
 
 # ── Auth endpoints ────────────────────────────────────────────────────────────

@@ -18,7 +18,8 @@ class TestStudyAssistantAPI(unittest.TestCase):
         """Verify that the /health endpoint returns status ok."""
         response = self.client.get("/health")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {"status": "ok"})
+        data = response.json()
+        self.assertEqual(data["status"], "ok")
 
     def test_study_rejects_non_pdf(self):
         """Verify that uploading a non-PDF file returns 400 Bad Request."""
