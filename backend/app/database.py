@@ -19,7 +19,9 @@ from .config import (
     SUPABASE_ANON_KEY,
     SUPABASE_SERVICE_ROLE_KEY,
     IS_SUPABASE_CONFIGURED,
+    SMTP_LOGIN_NOTIFICATION_ENABLED,
 )
+from .mail import send_email
 
 logger = logging.getLogger(__name__)
 
@@ -130,20 +132,54 @@ def sign_up(email: str, password: str, full_name: str = "") -> dict:
     email = email.strip().lower()
     if IS_SUPABASE_CONFIGURED:
         from supabase import create_client
-        client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
-        res = client.auth.sign_up({
-            "email": email,
-            "password": password,
-            "options": {"data": {"full_name": full_name}},
-        })
+
+        # Use service role to create the user directly. This bypasses Supabase's
+        # email confirmation rate limit, creates a confirmed user immediately,
+        # and triggers the profiles table insert automatically.
+        sr_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+        anon_client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+
+        try:
+            res = sr_client.auth.admin.create_user({
+                "email": email,
+                "password": password,
+                "email_confirm": True,
+                "user_metadata": {"full_name": full_name},
+            })
+        except Exception as exc:
+            err_msg = str(exc)
+            logger.warning("Service role create_user error for %s: %s", email, err_msg)
+            if any(phrase in err_msg.lower() for phrase in ["already registered", "user already", "already been registered"]):
+                raise ValueError("An account with this email already exists.")
+            raise ValueError("Sign up failed")
+
         if not res.user:
             raise ValueError("Sign up failed")
-        token = res.session.access_token if res.session else ""
-        return {
-            "access_token": token,
-            "user_id": res.user.id,
-            "email": res.user.email or email,
-        }
+
+        logger.info(
+            "Created user via service role for %s: id=%s, confirmed_at=%s",
+            email,
+            res.user.id,
+            res.user.email_confirmed_at,
+        )
+
+        # Sign in the new user to get a session token
+        try:
+            signin_res = anon_client.auth.sign_in_with_password({
+                "email": email,
+                "password": password,
+            })
+            if not signin_res.user or not signin_res.session:
+                raise ValueError("Sign up succeeded but could not create session")
+            return {
+                "access_token": signin_res.session.access_token,
+                "user_id": signin_res.user.id,
+                "email": signin_res.user.email or email,
+                "confirmation_required": False,
+            }
+        except Exception as exc:
+            logger.error("Failed to sign in after service role create for %s: %s", email, exc)
+            raise ValueError("Sign up failed")
 
     # Local SQLite fallback
     with _get_db() as conn:
@@ -167,6 +203,7 @@ def sign_up(email: str, password: str, full_name: str = "") -> dict:
             "access_token": token,
             "user_id": user_id,
             "email": email,
+            "confirmation_required": False,
         }
 
 
@@ -181,6 +218,19 @@ def sign_in(email: str, password: str) -> dict:
         })
         if not res.user or not res.session:
             raise ValueError("Invalid credentials")
+
+        if SMTP_LOGIN_NOTIFICATION_ENABLED:
+            send_email(
+                to=email,
+                subject="Successful login — AI Study Assistant",
+                body=(
+                    f"Hi there,\n\n"
+                    f"We noticed a successful login to your AI Study Assistant account ({email}).\n\n"
+                    f"If this wasn't you, please change your password immediately.\n\n"
+                    f"— AI Study Assistant"
+                ),
+            )
+
         return {
             "access_token": res.session.access_token,
             "user_id": res.user.id,

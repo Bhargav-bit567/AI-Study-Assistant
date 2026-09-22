@@ -71,6 +71,7 @@ async def signup(body: SignUpRequest):
             access_token=res["access_token"],
             user_id=res["user_id"],
             email=res["email"],
+            confirmation_required=res.get("confirmation_required", False),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

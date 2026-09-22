@@ -66,15 +66,22 @@ class TestStudyAssistantAPI(unittest.TestCase):
 
     def test_auth_and_history_lifecycle(self):
         """Verify user signup, signin, authenticated study save, and quiz stats."""
-        test_email = "student_test@example.com"
+        import uuid
+        from supabase import create_client
+        from backend.app.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+
+        test_email = f"student_test_{uuid.uuid4().hex[:8]}@example.com"
         test_pwd = "password123"
 
-        # 1. Sign up
-        res_signup = self.client.post(
-            "/api/auth/signup",
-            json={"email": test_email, "password": test_pwd, "full_name": "Test Student"},
-        )
-        self.assertIn(res_signup.status_code, [200, 400])
+        # 1. Create a pre-confirmed test user via service role
+        admin_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+        created = admin_client.auth.admin.create_user({
+            "email": test_email,
+            "password": test_pwd,
+            "email_confirm": True,
+            "user_metadata": {"full_name": "Test Student"},
+        })
+        self.assertIsNotNone(created.user)
 
         # 2. Sign in
         res_signin = self.client.post(
@@ -83,6 +90,7 @@ class TestStudyAssistantAPI(unittest.TestCase):
         )
         self.assertEqual(res_signin.status_code, 200)
         auth_data = res_signin.json()
+        self.assertFalse(auth_data["confirmation_required"])
         token = auth_data["access_token"]
         headers = {"Authorization": f"Bearer {token}"}
 
@@ -122,6 +130,9 @@ class TestStudyAssistantAPI(unittest.TestCase):
         self.assertGreaterEqual(stats["results_count"], 1)
         self.assertGreaterEqual(stats["quiz_attempts_count"], 1)
         self.assertEqual(stats["average_score_pct"], 80)
+
+        # Clean up test user
+        admin_client.auth.admin.delete_user(created.user.id)
 
 
 if __name__ == "__main__":

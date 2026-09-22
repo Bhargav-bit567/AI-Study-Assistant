@@ -155,6 +155,13 @@ document.addEventListener("DOMContentLoaded", () => {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || "Sign up failed");
+
+      if (data.confirmation_required) {
+        signUpError.textContent = `Account created. Please check ${data.email} to confirm your email before signing in.`;
+        signUpError.classList.remove("hidden");
+        return;
+      }
+
       authToken = data.access_token;
       currentUser = { email: data.email, id: data.user_id };
       localStorage.setItem("auth_token", authToken);

@@ -36,6 +36,7 @@ class AuthResponse(BaseModel):
     access_token: str
     user_id: str
     email: str
+    confirmation_required: bool = False
 
 
 # ── Quiz attempt model ────────────────────────────────────────────────────────
