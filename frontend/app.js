@@ -1,5 +1,5 @@
 document.addEventListener("DOMContentLoaded", () => {
-  const API_BASE = window.location.port === "8000" ? "" : "http://localhost:8000";
+  const API_BASE = "";
 
   // ── State ──────────────────────────────────────────────────────────────────
   let currentFile = null;
