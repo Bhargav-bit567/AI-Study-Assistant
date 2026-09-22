@@ -82,8 +82,8 @@ async def signup(body: SignUpRequest):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
-        logger.error("Signup error: %s", exc)
-        raise HTTPException(status_code=400, detail="Sign up failed")
+        logger.error("Signup error: %s", exc, exc_info=True)
+        raise HTTPException(status_code=400, detail=f"Sign up failed: {exc}")
 
 
 @app.post("/api/auth/signin", response_model=AuthResponse)
@@ -99,8 +99,8 @@ async def signin(body: SignInRequest):
     except ValueError as exc:
         raise HTTPException(status_code=401, detail=str(exc))
     except Exception as exc:
-        logger.error("Signin error: %s", exc)
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+        logger.error("Signin error: %s", exc, exc_info=True)
+        raise HTTPException(status_code=401, detail=f"Invalid credentials: {exc}")
 
 
 # ── Study endpoint ────────────────────────────────────────────────────────────
