@@ -544,20 +544,148 @@ body {
 
 /* ── Structured Summary Styles ── */
 
-/* Narrative Overview */
+/* Introductory Overview */
 .summary-overview {
-  margin-bottom: 28px;
+  margin-bottom: 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
 }
 
-.summary-overview p {
-  font-size: 1.02rem;
+.summary-overview-card {
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 18px 20px;
+  transition: border-color 0.2s, background 0.2s;
+}
+
+.summary-overview-card:hover {
+  background: rgba(255, 255, 255, 0.038);
+  border-color: rgba(99, 102, 241, 0.25);
+}
+
+.summary-overview-heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-heading);
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: #f8fafc;
+  letter-spacing: -0.01em;
+  margin-bottom: 12px;
+}
+
+.overview-heading-pill {
+  width: 4px;
+  height: 18px;
+  border-radius: 4px;
+  background: linear-gradient(180deg, var(--accent-cyan), var(--primary-500));
+  flex-shrink: 0;
+}
+
+.summary-overview-p {
+  font-size: 0.98rem;
   color: #e2e8f0;
-  line-height: 1.8;
-  margin-bottom: 14px;
+  line-height: 1.75;
+  margin-bottom: 12px;
 }
 
-.summary-overview p:last-child {
+.summary-overview-p:last-child {
   margin-bottom: 0;
+}
+
+.overview-bold {
+  font-weight: 600;
+  color: #ffffff;
+}
+
+.overview-italic {
+  font-style: italic;
+  color: #cbd5e1;
+}
+
+.overview-code {
+  font-family: monospace;
+  font-size: 0.88em;
+  padding: 2px 6px;
+  background: rgba(99, 102, 241, 0.15);
+  color: var(--accent-cyan);
+  border-radius: 4px;
+}
+
+/* Bullets List */
+.summary-overview-bullets {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.summary-overview-bullet-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  font-size: 0.97rem;
+  color: #e2e8f0;
+  line-height: 1.65;
+}
+
+.overview-bullet-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent-cyan);
+  box-shadow: 0 0 8px rgba(6, 182, 212, 0.6);
+  flex-shrink: 0;
+  margin-top: 8px;
+}
+
+.overview-bullet-text {
+  flex: 1;
+}
+
+/* Numbered Steps List */
+.summary-overview-numbered {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.summary-overview-numbered-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  font-size: 0.97rem;
+  color: #e2e8f0;
+  line-height: 1.65;
+}
+
+.overview-num-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: rgba(99, 102, 241, 0.18);
+  border: 1px solid rgba(99, 102, 241, 0.4);
+  color: var(--accent-cyan);
+  font-family: var(--font-heading);
+  font-size: 0.78rem;
+  font-weight: 700;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.overview-numbered-text {
+  flex: 1;
 }
 
 /* Sections Group Label */

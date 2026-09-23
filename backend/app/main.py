@@ -134,6 +134,7 @@ async def study(
         raise HTTPException(status_code=500, detail="Internal server error")
 
     summary = result.get("summary", "")
+    overview_blocks = result.get("overview_blocks", [])
     key_points = result.get("key_points", [])
     sections = result.get("sections", [])
     key_terms = result.get("key_terms", [])
@@ -153,6 +154,7 @@ async def study(
                 document_id=document_id,
                 action=action,
                 summary=summary,
+                overview_blocks=overview_blocks,
                 sections=sections,
                 key_points=key_points,
                 key_terms=key_terms,
@@ -165,6 +167,7 @@ async def study(
 
     return StudyResponse(
         summary=summary,
+        overview_blocks=overview_blocks,
         sections=sections,
         key_points=key_points,
         key_terms=key_terms,

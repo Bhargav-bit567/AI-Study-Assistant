@@ -89,7 +89,7 @@ _init_sqlite()
 # Migrate existing databases to add new columns (idempotent)
 def _migrate_sqlite():
     with _get_db() as conn:
-        for col in ("sections", "key_terms", "study_tips"):
+        for col in ("sections", "key_terms", "study_tips", "overview_blocks"):
             try:
                 conn.execute(f"ALTER TABLE results ADD COLUMN {col} TEXT")
                 conn.commit()
@@ -331,12 +331,14 @@ def save_result(
     document_id: str,
     action: str,
     summary: str = "",
+    overview_blocks: list = None,
     sections: list = None,
     key_points: list = None,
     key_terms: list = None,
     study_tips: list = None,
     mcqs: list = None,
 ) -> dict:
+    overview_blocks = overview_blocks or []
     sections = sections or []
     key_points = key_points or []
     key_terms = key_terms or []
@@ -352,6 +354,7 @@ def save_result(
                 "document_id": document_id,
                 "action": action,
                 "summary": summary,
+                "overview_blocks": overview_blocks,
                 "sections": sections,
                 "key_points": key_points,
                 "key_terms": key_terms,
@@ -367,14 +370,15 @@ def save_result(
         created_at = datetime.now(timezone.utc).isoformat()
         conn.execute(
             """INSERT INTO results
-               (id, document_id, user_id, action, summary, sections, key_points, key_terms, study_tips, mcqs, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (id, document_id, user_id, action, summary, overview_blocks, sections, key_points, key_terms, study_tips, mcqs, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 res_id,
                 document_id,
                 user_id,
                 action,
                 summary,
+                json.dumps(overview_blocks),
                 json.dumps(sections),
                 json.dumps(key_points),
                 json.dumps(key_terms),
@@ -390,6 +394,7 @@ def save_result(
             "user_id": user_id,
             "action": action,
             "summary": summary,
+            "overview_blocks": overview_blocks,
             "sections": sections,
             "key_points": key_points,
             "key_terms": key_terms,
@@ -429,7 +434,7 @@ def get_results(user_id: str) -> list:
         results = []
         for row in rows:
             r = dict(row)
-            for field in ("key_points", "mcqs", "sections", "key_terms", "study_tips"):
+            for field in ("key_points", "mcqs", "sections", "key_terms", "study_tips", "overview_blocks"):
                 try:
                     r[field] = json.loads(r[field]) if r.get(field) else []
                 except Exception:
@@ -469,7 +474,7 @@ def get_result_by_id(result_id: str, user_id: str) -> Optional[dict]:
         if not row:
             return None
         r = dict(row)
-        for field in ("key_points", "mcqs", "sections", "key_terms", "study_tips"):
+        for field in ("key_points", "mcqs", "sections", "key_terms", "study_tips", "overview_blocks"):
             try:
                 r[field] = json.loads(r[field]) if r.get(field) else []
             except Exception:

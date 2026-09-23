@@ -23,16 +23,28 @@ class KeyTerm(BaseModel):
     definition: str
 
 
+class OverviewBlock(BaseModel):
+    """A structured block within the introductory overview section."""
+    heading: str
+    content: Optional[str] = ""
+    bullet_points: list[str] = Field(default_factory=list)
+    numbered_points: list[str] = Field(default_factory=list)
+    callout: Optional[dict] = None
+    table: Optional[dict] = None
+
+
 class StudyResponse(BaseModel):
-    # Narrative overview paragraph(s)
+    # Narrative overview paragraph(s) / formatted markdown summary
     summary: str = ""
-    # Titled content sections (the bulk of the detail)
+    # Structured intro blocks for the introductory overview
+    overview_blocks: list[OverviewBlock] = Field(default_factory=list)
+    # Titled content sections (the bulk of the detail - Detailed Breakdown)
     sections: list[SummarySection] = Field(default_factory=list)
-    # Short takeaway bullets
+    # Short takeaway bullets (Core Takeaways)
     key_points: list[str] = Field(default_factory=list)
-    # Glossary of key terms
+    # Glossary of key terms (Key Terms Glossary)
     key_terms: list[KeyTerm] = Field(default_factory=list)
-    # Exam / revision tips
+    # Exam / revision tips (Study Tips)
     study_tips: list[str] = Field(default_factory=list)
     # MCQ data (action=mcqs only)
     mcqs: list[MCQ] = Field(default_factory=list)
@@ -84,6 +96,7 @@ class ResultOut(BaseModel):
     id: str
     action: str
     summary: str = ""
+    overview_blocks: list = Field(default_factory=list)
     sections: list = Field(default_factory=list)
     key_points: list = Field(default_factory=list)
     key_terms: list = Field(default_factory=list)

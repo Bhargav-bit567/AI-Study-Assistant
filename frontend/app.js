@@ -386,21 +386,163 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
 
+  function escapeHtml(str) {
+    return (str || "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#039;");
+  }
+
+  function formatInlineMarkdown(str) {
+    if (!str) return "";
+    let safe = escapeHtml(str);
+    safe = safe.replace(/\*\*(.*?)\*\*/g, '<strong class="overview-bold">$1</strong>');
+    safe = safe.replace(/\*(.*?)\*/g, '<em class="overview-italic">$1</em>');
+    safe = safe.replace(/`([^`]+)`/g, '<code class="overview-code">$1</code>');
+    return safe;
+  }
+
+  function renderIntroductoryOverview(container, data) {
+    const overviewBlock = document.createElement("div");
+    overviewBlock.className = "summary-overview";
+
+    const blocks = data.overview_blocks;
+    if (Array.isArray(blocks) && blocks.length > 0) {
+      blocks.forEach(block => {
+        const cardEl = document.createElement("div");
+        cardEl.className = "summary-overview-card";
+
+        if (block.heading) {
+          const hEl = document.createElement("h4");
+          hEl.className = "summary-overview-heading";
+          hEl.innerHTML = `<span class="overview-heading-pill"></span><span>${escapeHtml(block.heading)}</span>`;
+          cardEl.appendChild(hEl);
+        }
+
+        if (block.content && block.content.trim()) {
+          block.content.split(/\n{2,}/).forEach(para => {
+            if (!para.trim()) return;
+            const p = document.createElement("p");
+            p.className = "summary-overview-p";
+            p.innerHTML = formatInlineMarkdown(para.trim());
+            cardEl.appendChild(p);
+          });
+        }
+
+        if (Array.isArray(block.bullet_points) && block.bullet_points.length > 0) {
+          const ul = document.createElement("ul");
+          ul.className = "summary-overview-bullets";
+          block.bullet_points.forEach(bullet => {
+            if (!bullet.trim()) return;
+            const li = document.createElement("li");
+            li.className = "summary-overview-bullet-item";
+            li.innerHTML = `<span class="overview-bullet-dot"></span><span class="overview-bullet-text">${formatInlineMarkdown(bullet)}</span>`;
+            ul.appendChild(li);
+          });
+          cardEl.appendChild(ul);
+        }
+
+        if (Array.isArray(block.numbered_points) && block.numbered_points.length > 0) {
+          const ol = document.createElement("ol");
+          ol.className = "summary-overview-numbered";
+          block.numbered_points.forEach((item, idx) => {
+            if (!item.trim()) return;
+            const li = document.createElement("li");
+            li.className = "summary-overview-numbered-item";
+            li.innerHTML = `<span class="overview-num-badge">${idx + 1}</span><span class="overview-numbered-text">${formatInlineMarkdown(item)}</span>`;
+            ol.appendChild(li);
+          });
+          cardEl.appendChild(ol);
+        }
+
+        overviewBlock.appendChild(cardEl);
+      });
+    } else {
+      const rawText = data.summary || "No summary was generated.";
+      const rawLines = rawText.split(/\r?\n/);
+      let currentCard = document.createElement("div");
+      currentCard.className = "summary-overview-card";
+      let currentUl = null;
+      let currentOl = null;
+
+      rawLines.forEach(line => {
+        const trimmed = line.trim();
+        if (!trimmed) {
+          currentUl = null;
+          currentOl = null;
+          return;
+        }
+
+        const headingMatch = trimmed.match(/^#{2,4}\s+(.*)/);
+        if (headingMatch) {
+          if (currentCard.children.length > 0) {
+            overviewBlock.appendChild(currentCard);
+            currentCard = document.createElement("div");
+            currentCard.className = "summary-overview-card";
+          }
+          const hEl = document.createElement("h4");
+          hEl.className = "summary-overview-heading";
+          hEl.innerHTML = `<span class="overview-heading-pill"></span><span>${escapeHtml(headingMatch[1])}</span>`;
+          currentCard.appendChild(hEl);
+          currentUl = null;
+          currentOl = null;
+          return;
+        }
+
+        const bulletMatch = trimmed.match(/^[\u2022\u25cf\-\*]\s+(.*)/);
+        if (bulletMatch) {
+          if (!currentUl) {
+            currentUl = document.createElement("ul");
+            currentUl.className = "summary-overview-bullets";
+            currentCard.appendChild(currentUl);
+          }
+          const li = document.createElement("li");
+          li.className = "summary-overview-bullet-item";
+          li.innerHTML = `<span class="overview-bullet-dot"></span><span class="overview-bullet-text">${formatInlineMarkdown(bulletMatch[1])}</span>`;
+          currentUl.appendChild(li);
+          currentOl = null;
+          return;
+        }
+
+        const numMatch = trimmed.match(/^(\d+)[\.\)]\s+(.*)/);
+        if (numMatch) {
+          if (!currentOl) {
+            currentOl = document.createElement("ol");
+            currentOl.className = "summary-overview-numbered";
+            currentCard.appendChild(currentOl);
+          }
+          const li = document.createElement("li");
+          li.className = "summary-overview-numbered-item";
+          li.innerHTML = `<span class="overview-num-badge">${numMatch[1]}</span><span class="overview-numbered-text">${formatInlineMarkdown(numMatch[2])}</span>`;
+          currentOl.appendChild(li);
+          currentUl = null;
+          return;
+        }
+
+        const p = document.createElement("p");
+        p.className = "summary-overview-p";
+        p.innerHTML = formatInlineMarkdown(trimmed);
+        currentCard.appendChild(p);
+        currentUl = null;
+        currentOl = null;
+      });
+
+      if (currentCard.children.length > 0) {
+        overviewBlock.appendChild(currentCard);
+      }
+    }
+
+    container.appendChild(overviewBlock);
+  }
+
   // ── Render summary ─────────────────────────────────────────────────────────
   function renderSummary(data) {
     summaryContent.innerHTML = "";
 
-    // ── 1. Narrative Overview ──────────────────────────────────────────────
-    const overviewText = data.summary || "No summary was generated.";
-    const overviewBlock = document.createElement("div");
-    overviewBlock.className = "summary-overview";
-    overviewText.split(/\n{2,}/).forEach(para => {
-      if (!para.trim()) return;
-      const p = document.createElement("p");
-      p.textContent = para.trim();
-      overviewBlock.appendChild(p);
-    });
-    summaryContent.appendChild(overviewBlock);
+    // ── 1. Introductory Structured Overview ────────────────────────────────
+    renderIntroductoryOverview(summaryContent, data);
 
     // ── 2. Detailed Sections ───────────────────────────────────────────────
     const sections = data.sections || [];

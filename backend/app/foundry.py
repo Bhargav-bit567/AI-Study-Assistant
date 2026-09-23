@@ -97,10 +97,25 @@ class FoundryClient:
                 output_text = getattr(response, "output_text", None)
                 if not output_text and hasattr(response, "choices") and response.choices:
                     output_text = response.choices[0].message.content
-                if not output_text:
-                    output_text = str(response)
-
-                return self._extract_json(output_text)
+                res_dict = self._extract_json(output_text)
+                if isinstance(res_dict, dict):
+                    if "overview_blocks" in res_dict and (not res_dict.get("summary") or not isinstance(res_dict["summary"], str) or res_dict["summary"].strip() == ""):
+                        summary_md_parts = []
+                        for block in res_dict.get("overview_blocks", []):
+                            if isinstance(block, dict):
+                                if block.get("heading"):
+                                    summary_md_parts.append(f"### {block['heading']}")
+                                if block.get("content"):
+                                    summary_md_parts.append(block["content"])
+                                if block.get("bullet_points"):
+                                    for b in block["bullet_points"]:
+                                        summary_md_parts.append(f"• {b}")
+                                if block.get("numbered_points"):
+                                    for idx, num_item in enumerate(block["numbered_points"], 1):
+                                        summary_md_parts.append(f"{idx}. {num_item}")
+                                summary_md_parts.append("")
+                        res_dict["summary"] = "\n\n".join(p for p in summary_md_parts if p).strip()
+                return res_dict
             except Exception as exc:
                 logger.warning("Azure Agent call failed (%s). Falling back to local study analyzer.", exc)
 
@@ -130,8 +145,8 @@ class FoundryClient:
             extracted_text = f"Study material from {filename}. Includes key definitions, concepts, and principles."
 
         # Clean text
-        lines = [line.strip() for line in extracted_text.splitlines() if line.strip()]
-        sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', extracted_text) if len(s.strip()) > 8]
+        lines = [re.sub(r'\s+', ' ', line).strip() for line in extracted_text.splitlines() if line.strip()]
+        sentences = [re.sub(r'\s+', ' ', s).strip() for s in re.split(r'(?<=[.!?])\s+|\n+', extracted_text) if len(s.strip()) > 8]
 
         if action == "summary":
             return self._generate_local_summary(filename, extracted_text, lines, sentences)
@@ -143,17 +158,129 @@ class FoundryClient:
     def _generate_local_summary(self, filename: str, full_text: str, lines: list[str], sentences: list[str]) -> dict:
         title = lines[0] if lines else filename.replace(".pdf", "").replace("_", " ").title()
 
-        # ── 1. Narrative overview (up to 15 sentences) ────────────────────────
-        overview_sentences = sentences[:15] if len(sentences) >= 15 else sentences
-        if overview_sentences:
-            main_summary = " ".join(overview_sentences)
-        else:
-            main_summary = (
-                f"{title} is a comprehensive study document covering core principles, "
-                "foundational concepts, and practical applications of the subject matter. "
-                "This material provides structured learning content including definitions, "
-                "mechanisms, and real-world examples to aid in thorough understanding and revision."
-            )
+        # ── 1. Structured Introductory Overview ────────────────────────────────
+        overview_blocks = []
+
+        clean_title = title.strip()
+        topic_words = [w for w in re.split(r'[:\-\–—]', clean_title) if w.strip()]
+        main_subject = topic_words[0].strip() if topic_words else clean_title
+
+        # 1a. Topic Overview Paragraph (concise, clear, bold emphasis)
+        intro_p = (
+            f"**{clean_title}** provides a foundational framework covering essential principles, "
+            "operational mechanisms, and structured practical applications. It establishes key concepts "
+            "and communication architectures required for conceptual mastery and exam readiness."
+        )
+
+        overview_blocks.append({
+            "heading": f"{clean_title} Overview",
+            "content": intro_p,
+            "bullet_points": [],
+            "numbered_points": [],
+        })
+
+        # 1b. Why It Matters (naturally list-like bullet points)
+        why_bullets = []
+        for s in sentences:
+            s_low = s.lower()
+            if any(k in s_low for k in ["allows", "enables", "provides", "used to", "used for", "importance", "purpose", "foundation", "benefit"]):
+                clean_s = s.strip()
+                if 20 < len(clean_s) < 160 and clean_s not in why_bullets:
+                    if ":" in clean_s:
+                        prefix, rest = clean_s.split(":", 1)
+                        clean_s = f"**{prefix.strip()}**: {rest.strip()}"
+                    why_bullets.append(clean_s)
+            if len(why_bullets) >= 3:
+                break
+
+        if len(why_bullets) < 2:
+            why_bullets = [
+                f"**Core Foundation**: Establishes essential architectural principles and functional models for **{main_subject}**.",
+                "**Standardized Interoperability**: Facilitates seamless communication, resource sharing, and protocol consistency across systems.",
+                "**Practical Implementation**: Provides actionable rules and frameworks directly applied in real-world environments.",
+            ]
+
+        overview_blocks.append({
+            "heading": "Why It Matters",
+            "content": "",
+            "bullet_points": why_bullets,
+            "numbered_points": [],
+        })
+
+        # 1c. Key Concepts & Definitions
+        concept_bullets = []
+        for s in sentences:
+            if s.lower().startswith("page ") or s.strip().lower() == clean_title.lower():
+                continue
+            if re.search(r'\blayer\s*\d+|\bstep\s*\d+', s, re.I):
+                continue
+            m_def = re.match(r'^(?:The\s+)?([A-Za-z0-9\s\-/]{2,35})\s+(is a|is an|is|has|defines)\s+(.*)', s, re.IGNORECASE)
+            if m_def:
+                term_name = m_def.group(1).strip()
+                verb = m_def.group(2).strip().lower()
+                term_desc = m_def.group(3).strip().rstrip(".")
+                if 4 < len(term_desc) < 180 and term_name.lower() not in [clean_title.lower(), main_subject.lower()]:
+                    prefix = f"{verb.capitalize()} " if verb in ["has", "defines"] else ""
+                    concept_bullets.append(f"**{term_name}**: {prefix}{term_desc.capitalize()}.")
+            elif any(k in s.lower() for k in [" is a ", " is an ", " refers to ", " defined as "]):
+                parts = re.split(r'\b(is a|is an|refers to|defined as)\b', s, maxsplit=1, flags=re.IGNORECASE)
+                if len(parts) == 3 and 3 < len(parts[0].strip()) < 40:
+                    concept_bullets.append(f"**{parts[0].strip()}**: {parts[1].capitalize()} {parts[2].strip().rstrip('.')}.")
+            if len(concept_bullets) >= 4:
+                break
+
+        if not concept_bullets:
+            concept_bullets = [
+                f"**{main_subject}**: The primary discipline and architectural model governing this domain.",
+                "**Standard Protocols**: Formalized conventions and procedural rules ensuring reliable data transmission.",
+            ]
+
+        overview_blocks.append({
+            "heading": "Key Concepts & Principles",
+            "content": "",
+            "bullet_points": concept_bullets,
+            "numbered_points": [],
+        })
+
+        # 1d. Steps / Layers / Sequential Process (if present in text)
+        step_items = []
+        for s in sentences:
+            clauses = re.split(r'[,;]|\band\b', s) if any(k in s.lower() for k in ["layer", "step", "phase", "stage"]) else [s]
+            for cl in clauses:
+                m_layer = re.search(r'\b(layer\s*\d+|step\s*\d+|phase\s*\d+|stage\s*\d+)\b\s*(?:is|:|-)?\s*(.*?)$', cl, re.IGNORECASE)
+                if m_layer:
+                    lbl = m_layer.group(1).title()
+                    desc = m_layer.group(2).strip().rstrip(".")
+                    if desc:
+                        step_items.append(f"**{lbl}**: {desc}")
+                    else:
+                        step_items.append(f"**{lbl}**")
+            if len(step_items) >= 7:
+                break
+
+        if step_items:
+            overview_blocks.append({
+                "heading": "Structural Hierarchy & Process Flow",
+                "content": "",
+                "bullet_points": [],
+                "numbered_points": step_items,
+            })
+
+        # 1e. Assemble Markdown representation for main_summary
+        summary_md_parts = []
+        for block in overview_blocks:
+            summary_md_parts.append(f"### {block['heading']}")
+            if block.get("content"):
+                summary_md_parts.append(block["content"])
+            if block.get("bullet_points"):
+                for b in block["bullet_points"]:
+                    summary_md_parts.append(f"• {b}")
+            if block.get("numbered_points"):
+                for idx, num_item in enumerate(block["numbered_points"], 1):
+                    summary_md_parts.append(f"{idx}. {num_item}")
+            summary_md_parts.append("")
+
+        main_summary = "\n\n".join(p for p in summary_md_parts if p).strip()
 
         # ── 2. Build sections from heading-like lines ─────────────────────────
         # Heuristic: lines that are short (<= 80 chars), title-cased, and not ending in punctuation
@@ -271,6 +398,7 @@ class FoundryClient:
 
         return {
             "summary": main_summary,
+            "overview_blocks": overview_blocks,
             "sections": sections,
             "key_points": key_points,
             "key_terms": key_terms,
@@ -398,24 +526,30 @@ class FoundryClient:
             return (
                 "Read the attached study material thoroughly and return ONLY a valid JSON object "
                 "with no markdown fences and no extra text. Use this exact schema:\n"
-                "{"
-                '"summary": "A comprehensive 2-3 paragraph narrative overview of the entire document, '
-                'covering the main subject, its significance, and overall scope. Be detailed and informative.",'
-                '"sections": ['
-                '{"title": "Section heading extracted or inferred from the content",'
-                ' "content": "A detailed paragraph (4-8 sentences) elaborating on this specific topic, '
-                'including definitions, mechanisms, examples, and significance."}'
-                "],"
-                '"key_points": ["Concise actionable bullet — at least 8, up to 12"],'
-                '"key_terms": [{"term": "Technical term", "definition": "Clear, precise definition of the term as used in this material"}],'
-                '"study_tips": ["Concrete exam/revision tip — provide at least 4"]'
+                "{\n"
+                '  "overview_blocks": [\n'
+                '    {\n'
+                '      "heading": "Meaningful dynamic heading (e.g. \'<Topic> Overview\', \'Why It Matters\', \'Key Concepts & Principles\', \'Structural Hierarchy & Process Flow\')",'
+                '      "content": "Short readable paragraph with **bold** on core terms (1-3 sentences), or empty if block is list-only.",'
+                '      "bullet_points": ["Bullet items for concepts, reasons, or multi-faceted points (use **bold** for keywords/terms)"],'
+                '      "numbered_points": ["Numbered items if explaining sequential steps, processes, layers, or hierarchy (leave empty otherwise)"]'
+                '    }\n'
+                '  ],\n'
+                '  "summary": "Full formatted Markdown string combining all overview_blocks with ### headings, **bold** terms, bullet points, and numbered steps for backward compatibility.",\n'
+                '  "sections": [\n'
+                '    {"title": "Section heading extracted or inferred from the content",'
+                '     "content": "A detailed paragraph (4-8 sentences) elaborating on this specific topic, including definitions, mechanisms, examples, and significance."}\n'
+                '  ],\n'
+                '  "key_points": ["Concise actionable bullet — at least 8, up to 12"],\n'
+                '  "key_terms": [{"term": "Technical term", "definition": "Clear, precise definition of the term as used in this material"}],\n'
+                '  "study_tips": ["Concrete exam/revision tip — provide at least 4"]\n'
                 "}\n\n"
-                "Requirements: "
-                "(1) summary must be at least 3 substantial sentences; "
-                "(2) sections must cover ALL major topics — minimum 3 sections, ideally 5-7; "
-                "(3) key_points must have 8-12 bullets; "
-                "(4) key_terms must have at least 6 glossary entries; "
-                "(5) study_tips must have at least 4 tips. "
+                "Requirements:\n"
+                "(1) overview_blocks must divide introductory overview into 3-4 structured blocks with dynamic headings (e.g. Overview, Why It Matters, Key Concepts, Process/Hierarchy). Keep paragraphs short (1-3 sentences). Use bullet points where list-like. Use numbered lists where steps/processes/layers exist. Bold key terms.\n"
+                "(2) sections must cover ALL major topics for Detailed Breakdown — minimum 3 sections, ideally 5-7;\n"
+                "(3) key_points must have 8-12 bullets for Core Takeaways;\n"
+                "(4) key_terms must have at least 6 glossary entries;\n"
+                "(5) study_tips must have at least 4 tips.\n"
                 "Do not truncate. Cover all topics in the document."
             )
         if action == "mcqs":
