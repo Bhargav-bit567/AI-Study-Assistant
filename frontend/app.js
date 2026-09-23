@@ -779,23 +779,114 @@ document.addEventListener("DOMContentLoaded", () => {
   btnResetQuiz.addEventListener("click", () => renderMCQs({ mcqs: currentMCQs }));
 });
 
-// ── Star field generation ─────────────────────────────────────────────────
-(function generateStars() {
-  const layer = document.getElementById("starsLayer");
-  if (!layer) return;
-  const count = 120;
-  for (let i = 0; i < count; i++) {
-    const star = document.createElement("div");
-    star.className = "star";
-    star.style.cssText = [
-      `left:${Math.random() * 100}%`,
-      `top:${Math.random() * 100}%`,
-      `--d:${(Math.random() * 5 + 2.5).toFixed(1)}s`,
-      `--delay:-${(Math.random() * 8).toFixed(1)}s`,
-      `--max-op:${(Math.random() * 0.55 + 0.2).toFixed(2)}`,
-      `width:${Math.random() < 0.15 ? 3 : 2}px`,
-      `height:${Math.random() < 0.15 ? 3 : 2}px`,
-    ].join(";");
-    layer.appendChild(star);
+// ── Neural Canvas Background ──────────────────────────────────────────────
+(function initNeuralCanvas() {
+  const canvas = document.getElementById("neuralCanvas");
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+
+  let W, H, nodes, animId;
+
+  const NODE_COUNT   = 55;
+  const MAX_DIST     = 160;
+  const NODE_COLOR   = "rgba(0,255,100,";
+  const LINE_COLOR   = "rgba(0,255,100,";
+  const PULSE_COLOR  = "rgba(0,229,204,";
+
+  function resize() {
+    W = canvas.width  = window.innerWidth;
+    H = canvas.height = window.innerHeight;
   }
+
+  function makeNode() {
+    return {
+      x:    Math.random() * W,
+      y:    Math.random() * H,
+      vx:   (Math.random() - 0.5) * 0.45,
+      vy:   (Math.random() - 0.5) * 0.45,
+      r:    Math.random() * 1.8 + 0.8,
+      pulse: Math.random() * Math.PI * 2,
+      pulseSpeed: Math.random() * 0.025 + 0.01,
+    };
+  }
+
+  function init() {
+    resize();
+    nodes = Array.from({ length: NODE_COUNT }, makeNode);
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+
+    // Update positions
+    nodes.forEach(n => {
+      n.x += n.vx;
+      n.y += n.vy;
+      n.pulse += n.pulseSpeed;
+      if (n.x < 0 || n.x > W) n.vx *= -1;
+      if (n.y < 0 || n.y > H) n.vy *= -1;
+    });
+
+    // Draw connections
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) {
+        const dx = nodes[i].x - nodes[j].x;
+        const dy = nodes[i].y - nodes[j].y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < MAX_DIST) {
+          const alpha = (1 - dist / MAX_DIST) * 0.35;
+          ctx.beginPath();
+          ctx.strokeStyle = LINE_COLOR + alpha + ")";
+          ctx.lineWidth = 0.7;
+          ctx.moveTo(nodes[i].x, nodes[i].y);
+          ctx.lineTo(nodes[j].x, nodes[j].y);
+          ctx.stroke();
+
+          // Data pulse dot travelling along line
+          if (Math.random() < 0.001) {
+            const t  = (Date.now() % 1200) / 1200;
+            const px = nodes[i].x + (nodes[j].x - nodes[i].x) * t;
+            const py = nodes[i].y + (nodes[j].y - nodes[i].y) * t;
+            ctx.beginPath();
+            ctx.arc(px, py, 1.5, 0, Math.PI * 2);
+            ctx.fillStyle = PULSE_COLOR + "0.9)";
+            ctx.fill();
+          }
+        }
+      }
+    }
+
+    // Draw nodes
+    nodes.forEach(n => {
+      const glow = (Math.sin(n.pulse) + 1) / 2;
+      const alpha = 0.35 + glow * 0.55;
+      const r     = n.r + glow * 1.2;
+
+      // Outer glow ring
+      const grad = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, r * 3.5);
+      grad.addColorStop(0, NODE_COLOR + (alpha * 0.5) + ")");
+      grad.addColorStop(1, NODE_COLOR + "0)");
+      ctx.beginPath();
+      ctx.arc(n.x, n.y, r * 3.5, 0, Math.PI * 2);
+      ctx.fillStyle = grad;
+      ctx.fill();
+
+      // Core dot
+      ctx.beginPath();
+      ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
+      ctx.fillStyle = NODE_COLOR + alpha + ")";
+      ctx.fill();
+    });
+
+    animId = requestAnimationFrame(draw);
+  }
+
+  init();
+  draw();
+
+  window.addEventListener("resize", () => {
+    cancelAnimationFrame(animId);
+    init();
+    draw();
+  });
 })();
