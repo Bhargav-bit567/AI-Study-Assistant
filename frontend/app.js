@@ -388,25 +388,148 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // ── Render summary ─────────────────────────────────────────────────────────
   function renderSummary(data) {
-    summaryContent.textContent = data.summary || "No summary was generated.";
+    summaryContent.innerHTML = "";
+
+    // ── 1. Narrative Overview ──────────────────────────────────────────────
+    const overviewText = data.summary || "No summary was generated.";
+    const overviewBlock = document.createElement("div");
+    overviewBlock.className = "summary-overview";
+    overviewText.split(/\n{2,}/).forEach(para => {
+      if (!para.trim()) return;
+      const p = document.createElement("p");
+      p.textContent = para.trim();
+      overviewBlock.appendChild(p);
+    });
+    summaryContent.appendChild(overviewBlock);
+
+    // ── 2. Detailed Sections ───────────────────────────────────────────────
+    const sections = data.sections || [];
+    if (sections.length > 0) {
+      const sectionsWrap = document.createElement("div");
+      sectionsWrap.className = "summary-sections";
+      const sectLabel = document.createElement("h4");
+      sectLabel.className = "summary-section-group-label";
+      sectLabel.textContent = "Detailed Breakdown";
+      sectionsWrap.appendChild(sectLabel);
+      sections.forEach(sec => {
+        const secEl = document.createElement("div");
+        secEl.className = "summary-section";
+        const titleEl = document.createElement("div");
+        titleEl.className = "summary-section-title";
+        titleEl.innerHTML = `<span class="section-dot"></span>${sec.title || "Section"}`;
+        const bodyEl = document.createElement("p");
+        bodyEl.className = "summary-section-body";
+        bodyEl.textContent = sec.content || "";
+        secEl.appendChild(titleEl);
+        secEl.appendChild(bodyEl);
+        sectionsWrap.appendChild(secEl);
+      });
+      summaryContent.appendChild(sectionsWrap);
+    }
+
+    // ── 3. Key Points ──────────────────────────────────────────────────────
     keyPointsList.innerHTML = "";
-    if (data.key_points?.length > 0) {
-      data.key_points.forEach(p => {
+    const kps = data.key_points || [];
+    if (kps.length > 0) {
+      kps.forEach((p, i) => {
         const li = document.createElement("li");
-        li.textContent = p;
+        li.innerHTML = `<span class="kp-badge">${i + 1}</span><span>${p}</span>`;
         keyPointsList.appendChild(li);
       });
       keyPointsList.parentElement.classList.remove("hidden");
     } else {
       keyPointsList.parentElement.classList.add("hidden");
     }
+
+    // ── 4. Key Terms Glossary ──────────────────────────────────────────────
+    const existingGlossary = summaryContent.parentElement.querySelector(".key-terms-section");
+    if (existingGlossary) existingGlossary.remove();
+
+    const keyTerms = data.key_terms || [];
+    if (keyTerms.length > 0) {
+      const glossarySection = document.createElement("div");
+      glossarySection.className = "key-terms-section";
+      const glossLabel = document.createElement("h4");
+      glossLabel.className = "key-points-heading";
+      glossLabel.textContent = "Key Terms Glossary";
+      glossarySection.appendChild(glossLabel);
+      const grid = document.createElement("div");
+      grid.className = "key-terms-grid";
+      keyTerms.forEach(kt => {
+        const card = document.createElement("div");
+        card.className = "key-term-card";
+        const chip = document.createElement("div");
+        chip.className = "term-chip";
+        chip.textContent = kt.term || "";
+        const def = document.createElement("p");
+        def.className = "term-def";
+        def.textContent = kt.definition || "";
+        card.appendChild(chip);
+        card.appendChild(def);
+        grid.appendChild(card);
+      });
+      glossarySection.appendChild(grid);
+      summaryCard.querySelector(".key-points-section").after(glossarySection);
+    }
+
+    // ── 5. Study Tips ──────────────────────────────────────────────────────
+    const existingTips = summaryContent.parentElement.querySelector(".study-tips-section");
+    if (existingTips) existingTips.remove();
+
+    const tips = data.study_tips || [];
+    if (tips.length > 0) {
+      const tipsSection = document.createElement("div");
+      tipsSection.className = "study-tips-section";
+      const tipsLabel = document.createElement("h4");
+      tipsLabel.className = "key-points-heading study-tips-heading";
+      tipsLabel.innerHTML = "<span>💡</span> Study Tips";
+      tipsSection.appendChild(tipsLabel);
+      const tipsList = document.createElement("ul");
+      tipsList.className = "study-tips-list";
+      tips.forEach(tip => {
+        const li = document.createElement("li");
+        li.className = "study-tip-item";
+        li.textContent = tip;
+        tipsList.appendChild(li);
+      });
+      tipsSection.appendChild(tipsList);
+      // Append after glossary if present, otherwise after key-points
+      const afterEl = summaryCard.querySelector(".key-terms-section") ||
+                      summaryCard.querySelector(".key-points-section");
+      if (afterEl) afterEl.after(tipsSection);
+      else summaryCard.appendChild(tipsSection);
+    }
+
     summaryCard.classList.remove("hidden");
     summaryCard.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }
 
   copySummaryBtn.addEventListener("click", () => {
-    let text = summaryContent.textContent + "\n\nCore Takeaways:\n";
-    keyPointsList.querySelectorAll("li").forEach(li => { text += `• ${li.textContent}\n`; });
+    let text = "=== SUMMARY ===\n" + (summaryContent.querySelector(".summary-overview")?.innerText || "") + "\n\n";
+
+    summaryContent.querySelectorAll(".summary-section").forEach(s => {
+      const title = s.querySelector(".summary-section-title")?.innerText || "";
+      const body = s.querySelector(".summary-section-body")?.innerText || "";
+      text += `--- ${title} ---\n${body}\n\n`;
+    });
+
+    text += "=== KEY POINTS ===\n";
+    keyPointsList.querySelectorAll("li").forEach(li => { text += `• ${li.querySelector("span:last-child")?.textContent}\n`; });
+
+    const glossaryCards = summaryCard.querySelectorAll(".key-term-card");
+    if (glossaryCards.length) {
+      text += "\n=== KEY TERMS ===\n";
+      glossaryCards.forEach(c => {
+        text += `${c.querySelector(".term-chip")?.textContent}: ${c.querySelector(".term-def")?.textContent}\n`;
+      });
+    }
+
+    const tipItems = summaryCard.querySelectorAll(".study-tip-item");
+    if (tipItems.length) {
+      text += "\n=== STUDY TIPS ===\n";
+      tipItems.forEach(t => { text += `• ${t.textContent}\n`; });
+    }
+
     navigator.clipboard.writeText(text).then(() => {
       const orig = copySummaryBtn.innerHTML;
       copySummaryBtn.innerHTML = "<span>Copied!</span>";

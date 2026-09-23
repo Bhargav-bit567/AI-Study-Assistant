@@ -142,41 +142,139 @@ class FoundryClient:
 
     def _generate_local_summary(self, filename: str, full_text: str, lines: list[str], sentences: list[str]) -> dict:
         title = lines[0] if lines else filename.replace(".pdf", "").replace("_", " ").title()
-        
-        # Build structured overview
-        if len(sentences) >= 3:
-            main_summary = " ".join(sentences[:4])
-        elif sentences:
-            main_summary = " ".join(sentences)
-        else:
-            main_summary = f"Comprehensive review of concepts covered in {title}."
 
-        # Extract key points
+        # ── 1. Narrative overview (up to 15 sentences) ────────────────────────
+        overview_sentences = sentences[:15] if len(sentences) >= 15 else sentences
+        if overview_sentences:
+            main_summary = " ".join(overview_sentences)
+        else:
+            main_summary = (
+                f"{title} is a comprehensive study document covering core principles, "
+                "foundational concepts, and practical applications of the subject matter. "
+                "This material provides structured learning content including definitions, "
+                "mechanisms, and real-world examples to aid in thorough understanding and revision."
+            )
+
+        # ── 2. Build sections from heading-like lines ─────────────────────────
+        # Heuristic: lines that are short (<= 80 chars), title-cased, and not ending in punctuation
+        heading_indices = []
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if (
+                5 < len(stripped) <= 80
+                and not stripped.endswith(".")
+                and not stripped.endswith(",")
+                and (stripped[0].isupper() or stripped[0].isdigit())
+                and i > 0  # skip first line (document title)
+            ):
+                heading_indices.append(i)
+
+        sections = []
+        # Pair each heading with the lines that follow it until the next heading
+        for idx, h_idx in enumerate(heading_indices[:7]):
+            section_title = lines[h_idx].lstrip("0123456789. ").strip()
+            next_h = heading_indices[idx + 1] if idx + 1 < len(heading_indices) else len(lines)
+            body_lines = [l for l in lines[h_idx + 1 : next_h] if len(l) > 20]
+            body = " ".join(body_lines[:12])  # up to 12 lines of content per section
+            if len(body) < 30:
+                # Fallback: use sentences near this heading
+                body = " ".join(sentences[h_idx : h_idx + 5]) if h_idx < len(sentences) else ""
+            if section_title and len(body) > 20:
+                sections.append({"title": section_title, "content": body})
+
+        # If no headings detected, synthesise sections from sentence groups
+        if not sections:
+            chunk_size = max(3, len(sentences) // 5)
+            generic_titles = [
+                "Introduction & Overview",
+                "Core Concepts & Definitions",
+                "Key Mechanisms & Processes",
+                "Applications & Examples",
+                "Summary & Review",
+            ]
+            for i, g_title in enumerate(generic_titles):
+                start = i * chunk_size
+                end = start + chunk_size
+                chunk = sentences[start:end]
+                if chunk:
+                    sections.append({"title": g_title, "content": " ".join(chunk)})
+
+        # ── 3. Key points (up to 12 bullets) ─────────────────────────────────
         key_points = []
         for line in lines[1:]:
-            if len(line) > 15 and not line.lower().startswith("page ") and len(key_points) < 6:
-                clean_p = line.lstrip("-*•0123456789. ")
-                if clean_p and clean_p not in key_points:
+            if len(line) > 15 and not line.lower().startswith("page ") and len(key_points) < 12:
+                clean_p = line.lstrip("-*•0123456789. ").strip()
+                if clean_p and clean_p not in key_points and len(clean_p) > 15:
                     key_points.append(clean_p)
 
-        if len(key_points) < 3 and sentences:
-            for s in sentences[1:]:
+        # Supplement from sentences if not enough
+        if len(key_points) < 6:
+            for s in sentences:
                 clean_s = s.strip()
-                if clean_s and clean_s not in key_points and len(clean_s) > 15:
+                if clean_s and clean_s not in key_points and len(clean_s) > 20:
                     key_points.append(clean_s)
-                if len(key_points) >= 4:
+                if len(key_points) >= 10:
                     break
 
         if not key_points:
             key_points = [
                 f"Core foundations and taxonomy outlined in {title}.",
-                "Standard operational mechanisms and protocol hierarchy.",
-                "Practical implementation considerations and system architecture.",
+                "Standard operational mechanisms and protocol hierarchy explained.",
+                "Practical implementation considerations and system architecture covered.",
+                "Key definitions and terminology introduced for exam readiness.",
+                "Conceptual models and frameworks presented for structured understanding.",
             ]
+
+        # ── 4. Key terms (glossary) — extract capitalised or technical words ──
+        import re as _re
+        key_terms = []
+        # Look for patterns like "TERM — definition" or "TERM: definition"
+        term_pattern = _re.compile(r'^([A-Z][A-Za-z/ ]{2,40})[:\-–—]\s*(.{15,})', _re.MULTILINE)
+        for match in term_pattern.finditer(full_text):
+            term = match.group(1).strip()
+            defn = match.group(2).strip().split(".")[0] + "."  # first sentence only
+            if len(term) < 50 and len(defn) > 15 and len(key_terms) < 12:
+                key_terms.append({"term": term, "definition": defn})
+
+        # Fallback key terms from capitalised multi-word phrases
+        if len(key_terms) < 4:
+            cap_pattern = _re.compile(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,4})\b')
+            seen_terms = {t["term"] for t in key_terms}
+            for match in cap_pattern.finditer(full_text):
+                phrase = match.group(1)
+                if phrase not in seen_terms and len(phrase) > 6:
+                    # Find the sentence containing this phrase as definition
+                    for sent in sentences:
+                        if phrase in sent and len(sent) > 20:
+                            key_terms.append({"term": phrase, "definition": sent.strip()})
+                            seen_terms.add(phrase)
+                            break
+                if len(key_terms) >= 8:
+                    break
+
+        if not key_terms:
+            key_terms = [
+                {"term": title, "definition": f"The primary subject of this study document, covering foundational principles and applications."},
+                {"term": "Protocol", "definition": "A set of rules and conventions that govern communication between systems."},
+                {"term": "Architecture", "definition": "The structured design and organisation of a system's components and their relationships."},
+            ]
+
+        # ── 5. Study tips ─────────────────────────────────────────────────────
+        study_tips = [
+            f"Create a mind-map of the key sections in '{title}' to visualise relationships between topics.",
+            "Use active recall: cover your notes and try to recite each section heading and its main idea.",
+            "Generate your own MCQs from the Key Terms glossary and test yourself without looking at the definitions.",
+            "Relate each section to a real-world application or example to anchor abstract concepts in memory.",
+            "Spaced repetition: review this summary after 1 day, 3 days, and 7 days for maximum retention.",
+            "Focus extra time on any Key Terms with definitions longer than two sentences — they indicate complex concepts.",
+        ]
 
         return {
             "summary": main_summary,
+            "sections": sections,
             "key_points": key_points,
+            "key_terms": key_terms,
+            "study_tips": study_tips,
             "mcqs": [],
         }
 
@@ -298,10 +396,27 @@ class FoundryClient:
     def _build_prompt(self, action: str) -> str:
         if action == "summary":
             return (
-                "Read the attached study material and return ONLY a JSON object "
-                "with no markdown and no extra text:\n"
-                '{"summary": "...", "key_points": ["...", "..."]}\n\n'
-                "The summary should be concise. Key points should be short bullets."
+                "Read the attached study material thoroughly and return ONLY a valid JSON object "
+                "with no markdown fences and no extra text. Use this exact schema:\n"
+                "{"
+                '"summary": "A comprehensive 2-3 paragraph narrative overview of the entire document, '
+                'covering the main subject, its significance, and overall scope. Be detailed and informative.",'
+                '"sections": ['
+                '{"title": "Section heading extracted or inferred from the content",'
+                ' "content": "A detailed paragraph (4-8 sentences) elaborating on this specific topic, '
+                'including definitions, mechanisms, examples, and significance."}'
+                "],"
+                '"key_points": ["Concise actionable bullet — at least 8, up to 12"],'
+                '"key_terms": [{"term": "Technical term", "definition": "Clear, precise definition of the term as used in this material"}],'
+                '"study_tips": ["Concrete exam/revision tip — provide at least 4"]'
+                "}\n\n"
+                "Requirements: "
+                "(1) summary must be at least 3 substantial sentences; "
+                "(2) sections must cover ALL major topics — minimum 3 sections, ideally 5-7; "
+                "(3) key_points must have 8-12 bullets; "
+                "(4) key_terms must have at least 6 glossary entries; "
+                "(5) study_tips must have at least 4 tips. "
+                "Do not truncate. Cover all topics in the document."
             )
         if action == "mcqs":
             return (

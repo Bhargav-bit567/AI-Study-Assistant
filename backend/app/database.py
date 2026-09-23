@@ -86,6 +86,18 @@ def _init_sqlite():
 
 _init_sqlite()
 
+# Migrate existing databases to add new columns (idempotent)
+def _migrate_sqlite():
+    with _get_db() as conn:
+        for col in ("sections", "key_terms", "study_tips"):
+            try:
+                conn.execute(f"ALTER TABLE results ADD COLUMN {col} TEXT")
+                conn.commit()
+            except Exception:
+                pass  # Column already exists — safe to ignore
+
+_migrate_sqlite()
+
 
 def _hash_password(password: str) -> str:
     salt = "ai_study_salt_"
@@ -319,10 +331,16 @@ def save_result(
     document_id: str,
     action: str,
     summary: str = "",
+    sections: list = None,
     key_points: list = None,
+    key_terms: list = None,
+    study_tips: list = None,
     mcqs: list = None,
 ) -> dict:
+    sections = sections or []
     key_points = key_points or []
+    key_terms = key_terms or []
+    study_tips = study_tips or []
     mcqs = mcqs or []
 
     if IS_SUPABASE_CONFIGURED:
@@ -334,7 +352,10 @@ def save_result(
                 "document_id": document_id,
                 "action": action,
                 "summary": summary,
+                "sections": sections,
                 "key_points": key_points,
+                "key_terms": key_terms,
+                "study_tips": study_tips,
                 "mcqs": mcqs,
             }).execute()
             return res.data[0]
@@ -345,15 +366,19 @@ def save_result(
         res_id = str(uuid.uuid4())
         created_at = datetime.now(timezone.utc).isoformat()
         conn.execute(
-            """INSERT INTO results (id, document_id, user_id, action, summary, key_points, mcqs, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO results
+               (id, document_id, user_id, action, summary, sections, key_points, key_terms, study_tips, mcqs, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 res_id,
                 document_id,
                 user_id,
                 action,
                 summary,
+                json.dumps(sections),
                 json.dumps(key_points),
+                json.dumps(key_terms),
+                json.dumps(study_tips),
                 json.dumps(mcqs),
                 created_at,
             ),
@@ -365,7 +390,10 @@ def save_result(
             "user_id": user_id,
             "action": action,
             "summary": summary,
+            "sections": sections,
             "key_points": key_points,
+            "key_terms": key_terms,
+            "study_tips": study_tips,
             "mcqs": mcqs,
             "created_at": created_at,
         }
@@ -401,14 +429,11 @@ def get_results(user_id: str) -> list:
         results = []
         for row in rows:
             r = dict(row)
-            try:
-                r["key_points"] = json.loads(r["key_points"]) if r["key_points"] else []
-            except Exception:
-                r["key_points"] = []
-            try:
-                r["mcqs"] = json.loads(r["mcqs"]) if r["mcqs"] else []
-            except Exception:
-                r["mcqs"] = []
+            for field in ("key_points", "mcqs", "sections", "key_terms", "study_tips"):
+                try:
+                    r[field] = json.loads(r[field]) if r.get(field) else []
+                except Exception:
+                    r[field] = []
             r["documents"] = {"filename": r.pop("filename", "Unknown file"), "file_size": r.pop("file_size", 0)}
             results.append(r)
         return results
@@ -444,14 +469,11 @@ def get_result_by_id(result_id: str, user_id: str) -> Optional[dict]:
         if not row:
             return None
         r = dict(row)
-        try:
-            r["key_points"] = json.loads(r["key_points"]) if r["key_points"] else []
-        except Exception:
-            r["key_points"] = []
-        try:
-            r["mcqs"] = json.loads(r["mcqs"]) if r["mcqs"] else []
-        except Exception:
-            r["mcqs"] = []
+        for field in ("key_points", "mcqs", "sections", "key_terms", "study_tips"):
+            try:
+                r[field] = json.loads(r[field]) if r.get(field) else []
+            except Exception:
+                r[field] = []
         r["documents"] = {"filename": r.pop("filename", "Unknown file")}
         return r
 

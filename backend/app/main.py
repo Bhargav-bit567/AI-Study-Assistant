@@ -135,6 +135,9 @@ async def study(
 
     summary = result.get("summary", "")
     key_points = result.get("key_points", [])
+    sections = result.get("sections", [])
+    key_terms = result.get("key_terms", [])
+    study_tips = result.get("study_tips", [])
     mcqs = result.get("mcqs", [])
 
     document_id = None
@@ -150,7 +153,10 @@ async def study(
                 document_id=document_id,
                 action=action,
                 summary=summary,
+                sections=sections,
                 key_points=key_points,
+                key_terms=key_terms,
+                study_tips=study_tips,
                 mcqs=mcqs,
             )
             result_id = saved["id"]
@@ -159,7 +165,10 @@ async def study(
 
     return StudyResponse(
         summary=summary,
+        sections=sections,
         key_points=key_points,
+        key_terms=key_terms,
+        study_tips=study_tips,
         mcqs=mcqs,
         document_id=document_id,
         result_id=result_id,

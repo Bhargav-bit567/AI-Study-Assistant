@@ -11,10 +11,32 @@ class MCQ(BaseModel):
     explanation: str
 
 
+class SummarySection(BaseModel):
+    """A titled section of the structured summary."""
+    title: str
+    content: str
+
+
+class KeyTerm(BaseModel):
+    """A glossary term extracted from the study material."""
+    term: str
+    definition: str
+
+
 class StudyResponse(BaseModel):
+    # Narrative overview paragraph(s)
     summary: str = ""
+    # Titled content sections (the bulk of the detail)
+    sections: list[SummarySection] = Field(default_factory=list)
+    # Short takeaway bullets
     key_points: list[str] = Field(default_factory=list)
+    # Glossary of key terms
+    key_terms: list[KeyTerm] = Field(default_factory=list)
+    # Exam / revision tips
+    study_tips: list[str] = Field(default_factory=list)
+    # MCQ data (action=mcqs only)
     mcqs: list[MCQ] = Field(default_factory=list)
+    # DB references
     document_id: Optional[str] = None
     result_id: Optional[str] = None
 
@@ -62,7 +84,10 @@ class ResultOut(BaseModel):
     id: str
     action: str
     summary: str = ""
+    sections: list = Field(default_factory=list)
     key_points: list = Field(default_factory=list)
+    key_terms: list = Field(default_factory=list)
+    study_tips: list = Field(default_factory=list)
     mcqs: list = Field(default_factory=list)
     created_at: str
     documents: Optional[dict] = None
