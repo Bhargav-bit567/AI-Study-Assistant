@@ -21,7 +21,7 @@ from .config import (
     IS_SUPABASE_CONFIGURED,
     SMTP_LOGIN_NOTIFICATION_ENABLED,
 )
-from .mail import send_email
+from .mail import send_email, send_welcome_email, send_login_notification_email
 
 logger = logging.getLogger(__name__)
 
@@ -175,6 +175,12 @@ def sign_up(email: str, password: str, full_name: str = "") -> dict:
             res.user.email_confirmed_at,
         )
 
+        # Send welcome email (non-blocking; failures are logged)
+        try:
+            send_welcome_email(email)
+        except Exception as exc:
+            logger.warning("Failed to send welcome email to %s: %s", email, exc)
+
         # Sign in the new user to get a session token
         try:
             signin_res = anon_client.auth.sign_in_with_password({
@@ -232,16 +238,10 @@ def sign_in(email: str, password: str) -> dict:
             raise ValueError("Invalid credentials")
 
         if SMTP_LOGIN_NOTIFICATION_ENABLED:
-            send_email(
-                to=email,
-                subject="Successful login — AI Study Assistant",
-                body=(
-                    f"Hi there,\n\n"
-                    f"We noticed a successful login to your AI Study Assistant account ({email}).\n\n"
-                    f"If this wasn't you, please change your password immediately.\n\n"
-                    f"— AI Study Assistant"
-                ),
-            )
+            try:
+                send_login_notification_email(email)
+            except Exception as exc:
+                logger.warning("Failed to send login notification to %s: %s", email, exc)
 
         return {
             "access_token": res.session.access_token,
