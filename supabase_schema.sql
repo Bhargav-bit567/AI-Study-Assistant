@@ -38,14 +38,18 @@ create table if not exists public.documents (
 
 -- ── Results (cached summaries + MCQs) ───────────────────────────────────────
 create table if not exists public.results (
-  id          uuid primary key default uuid_generate_v4(),
-  document_id uuid references public.documents(id) on delete cascade,
-  user_id     uuid references public.profiles(id) on delete cascade,
-  action      text not null check (action in ('summary', 'mcqs')),
-  summary     text,
-  key_points  jsonb default '[]',
-  mcqs        jsonb default '[]',
-  created_at  timestamptz default now()
+  id              uuid primary key default uuid_generate_v4(),
+  document_id     uuid references public.documents(id) on delete cascade,
+  user_id         uuid references public.profiles(id) on delete cascade,
+  action          text not null check (action in ('summary', 'mcqs')),
+  summary         text,
+  overview_blocks jsonb default '[]',
+  sections        jsonb default '[]',
+  key_points      jsonb default '[]',
+  key_terms       jsonb default '[]',
+  study_tips      jsonb default '[]',
+  mcqs            jsonb default '[]',
+  created_at      timestamptz default now()
 );
 
 -- ── Quiz attempts ────────────────────────────────────────────────────────────

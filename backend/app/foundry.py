@@ -6,6 +6,7 @@ import base64
 import io
 import json
 import logging
+import random
 import re
 from typing import TYPE_CHECKING, Optional
 
@@ -23,6 +24,10 @@ if TYPE_CHECKING:
     from fastapi import UploadFile
 
 logger = logging.getLogger(__name__)
+
+# Token / length guardrails
+MAX_TEXT_CHARS = 100_000  # keep prompts within reasonable limits
+MAX_SENTENCES_FOR_FALLBACK = 400
 
 
 class FoundryClient:
@@ -65,9 +70,13 @@ class FoundryClient:
         """Execute study agent on the document."""
         file_info = json.loads(file_id)
 
+        # Extract text up-front so we can always feed document content to the model/fallback.
+        filename, extracted_text = _extract_pdf_text(file_info)
+        file_info["extracted_text"] = extracted_text  # keep for fallback reuse
+
         # 1. Try Azure AI Foundry if configured
         if self.azure_ready:
-            prompt = self._build_prompt(action)
+            prompt = self._build_prompt(action, filename, extracted_text)
             try:
                 response = self.client.responses.create(
                     model=AZURE_MODEL_DEPLOYMENT,
@@ -77,7 +86,7 @@ class FoundryClient:
                             "content": [
                                 {
                                     "type": "input_file",
-                                    "filename": file_info["filename"],
+                                    "filename": filename,
                                     "file_data": file_info["data_uri"],
                                 },
                                 {"type": "input_text", "text": prompt},
@@ -91,7 +100,7 @@ class FoundryClient:
                             "type": "agent_reference",
                         },
                     },
-                    timeout=120,
+                    timeout=180,
                 )
                 logger.info("Azure response received for action=%s", action)
                 output_text = getattr(response, "output_text", None)
@@ -99,22 +108,7 @@ class FoundryClient:
                     output_text = response.choices[0].message.content
                 res_dict = self._extract_json(output_text)
                 if isinstance(res_dict, dict):
-                    if "overview_blocks" in res_dict and (not res_dict.get("summary") or not isinstance(res_dict["summary"], str) or res_dict["summary"].strip() == ""):
-                        summary_md_parts = []
-                        for block in res_dict.get("overview_blocks", []):
-                            if isinstance(block, dict):
-                                if block.get("heading"):
-                                    summary_md_parts.append(f"### {block['heading']}")
-                                if block.get("content"):
-                                    summary_md_parts.append(block["content"])
-                                if block.get("bullet_points"):
-                                    for b in block["bullet_points"]:
-                                        summary_md_parts.append(f"• {b}")
-                                if block.get("numbered_points"):
-                                    for idx, num_item in enumerate(block["numbered_points"], 1):
-                                        summary_md_parts.append(f"{idx}. {num_item}")
-                                summary_md_parts.append("")
-                        res_dict["summary"] = "\n\n".join(p for p in summary_md_parts if p).strip()
+                    res_dict = _normalize_summary_response(res_dict)
                 return res_dict
             except Exception as exc:
                 logger.warning("Azure Agent call failed (%s). Falling back to local study analyzer.", exc)
@@ -125,28 +119,13 @@ class FoundryClient:
     def _run_local_study_engine(self, file_info: dict, action: str) -> dict:
         """Extract text from PDF and generate structured summary or MCQs."""
         filename = file_info.get("filename", "notes.pdf")
-        raw_b64 = file_info.get("raw_base64", "")
-        extracted_text = ""
-
-        if raw_b64:
-            try:
-                raw_bytes = base64.b64decode(raw_b64)
-                reader = PdfReader(io.BytesIO(raw_bytes))
-                pages_text = []
-                for p in reader.pages:
-                    t = p.extract_text()
-                    if t:
-                        pages_text.append(t.strip())
-                extracted_text = "\n\n".join(pages_text).strip()
-            except Exception as exc:
-                logger.warning("PDF extraction error: %s", exc)
+        extracted_text = file_info.get("extracted_text", "")
 
         if not extracted_text:
             extracted_text = f"Study material from {filename}. Includes key definitions, concepts, and principles."
 
-        # Clean text
         lines = [re.sub(r'\s+', ' ', line).strip() for line in extracted_text.splitlines() if line.strip()]
-        sentences = [re.sub(r'\s+', ' ', s).strip() for s in re.split(r'(?<=[.!?])\s+|\n+', extracted_text) if len(s.strip()) > 8]
+        sentences = _split_sentences(extracted_text)
 
         if action == "summary":
             return self._generate_local_summary(filename, extracted_text, lines, sentences)
@@ -156,50 +135,34 @@ class FoundryClient:
             raise ValueError(f"Unsupported action: {action}")
 
     def _generate_local_summary(self, filename: str, full_text: str, lines: list[str], sentences: list[str]) -> dict:
-        title = lines[0] if lines else filename.replace(".pdf", "").replace("_", " ").title()
+        title = _infer_title(filename, lines)
 
-        # ── 1. Structured Introductory Overview ────────────────────────────────
+        # Build a genuinely document-derived overview by chunking sentences.
+        chunks = _chunk_sentences(sentences, chunk_size=6)
         overview_blocks = []
 
-        clean_title = title.strip()
-        topic_words = [w for w in re.split(r'[:\-\–—]', clean_title) if w.strip()]
-        main_subject = topic_words[0].strip() if topic_words else clean_title
-
-        # 1a. Topic Overview Paragraph (concise, clear, bold emphasis)
-        intro_p = (
-            f"**{clean_title}** provides a foundational framework covering essential principles, "
-            "operational mechanisms, and structured practical applications. It establishes key concepts "
-            "and communication architectures required for conceptual mastery and exam readiness."
-        )
-
+        # Block 1: concise topic overview derived from the first meaningful chunk.
+        overview_text = " ".join(chunks[0][:4]) if chunks else f"This document covers the core principles of {title}."
         overview_blocks.append({
-            "heading": f"{clean_title} Overview",
-            "content": intro_p,
+            "heading": f"{title} Overview",
+            "content": f"**{title}** — {overview_text}",
             "bullet_points": [],
             "numbered_points": [],
         })
 
-        # 1b. Why It Matters (naturally list-like bullet points)
+        # Block 2: "Why It Matters" from sentences signalling purpose/importance.
         why_bullets = []
+        purpose_keywords = ["allows", "enables", "provides", "used to", "used for", "importance", "purpose", "foundation", "benefit", "helps", "ensures", "supports"]
         for s in sentences:
             s_low = s.lower()
-            if any(k in s_low for k in ["allows", "enables", "provides", "used to", "used for", "importance", "purpose", "foundation", "benefit"]):
+            if any(k in s_low for k in purpose_keywords):
                 clean_s = s.strip()
-                if 20 < len(clean_s) < 160 and clean_s not in why_bullets:
-                    if ":" in clean_s:
-                        prefix, rest = clean_s.split(":", 1)
-                        clean_s = f"**{prefix.strip()}**: {rest.strip()}"
+                if 20 < len(clean_s) < 200 and clean_s not in why_bullets:
                     why_bullets.append(clean_s)
-            if len(why_bullets) >= 3:
-                break
-
+                if len(why_bullets) >= 4:
+                    break
         if len(why_bullets) < 2:
-            why_bullets = [
-                f"**Core Foundation**: Establishes essential architectural principles and functional models for **{main_subject}**.",
-                "**Standardized Interoperability**: Facilitates seamless communication, resource sharing, and protocol consistency across systems.",
-                "**Practical Implementation**: Provides actionable rules and frameworks directly applied in real-world environments.",
-            ]
-
+            why_bullets = [f"Establishes the foundational principles of **{title}**.", "Provides structured concepts for practical application."]
         overview_blocks.append({
             "heading": "Why It Matters",
             "content": "",
@@ -207,186 +170,39 @@ class FoundryClient:
             "numbered_points": [],
         })
 
-        # 1c. Key Concepts & Definitions
-        concept_bullets = []
-        for s in sentences:
-            if s.lower().startswith("page ") or s.strip().lower() == clean_title.lower():
-                continue
-            if re.search(r'\blayer\s*\d+|\bstep\s*\d+', s, re.I):
-                continue
-            m_def = re.match(r'^(?:The\s+)?([A-Za-z0-9\s\-/]{2,35})\s+(is a|is an|is|has|defines)\s+(.*)', s, re.IGNORECASE)
-            if m_def:
-                term_name = m_def.group(1).strip()
-                verb = m_def.group(2).strip().lower()
-                term_desc = m_def.group(3).strip().rstrip(".")
-                if 4 < len(term_desc) < 180 and term_name.lower() not in [clean_title.lower(), main_subject.lower()]:
-                    prefix = f"{verb.capitalize()} " if verb in ["has", "defines"] else ""
-                    concept_bullets.append(f"**{term_name}**: {prefix}{term_desc.capitalize()}.")
-            elif any(k in s.lower() for k in [" is a ", " is an ", " refers to ", " defined as "]):
-                parts = re.split(r'\b(is a|is an|refers to|defined as)\b', s, maxsplit=1, flags=re.IGNORECASE)
-                if len(parts) == 3 and 3 < len(parts[0].strip()) < 40:
-                    concept_bullets.append(f"**{parts[0].strip()}**: {parts[1].capitalize()} {parts[2].strip().rstrip('.')}.")
-            if len(concept_bullets) >= 4:
-                break
-
-        if not concept_bullets:
-            concept_bullets = [
-                f"**{main_subject}**: The primary discipline and architectural model governing this domain.",
-                "**Standard Protocols**: Formalized conventions and procedural rules ensuring reliable data transmission.",
-            ]
-
+        # Block 3: Key Concepts & Principles — extract definitions from the text.
+        concept_bullets = _extract_definitions(sentences, title)
+        if len(concept_bullets) < 3:
+            concept_bullets += [f"**{title}**: The primary subject introduced in the document."]
         overview_blocks.append({
             "heading": "Key Concepts & Principles",
             "content": "",
-            "bullet_points": concept_bullets,
+            "bullet_points": concept_bullets[:6],
             "numbered_points": [],
         })
 
-        # 1d. Steps / Layers / Sequential Process (if present in text)
-        step_items = []
-        for s in sentences:
-            clauses = re.split(r'[,;]|\band\b', s) if any(k in s.lower() for k in ["layer", "step", "phase", "stage"]) else [s]
-            for cl in clauses:
-                m_layer = re.search(r'\b(layer\s*\d+|step\s*\d+|phase\s*\d+|stage\s*\d+)\b\s*(?:is|:|-)?\s*(.*?)$', cl, re.IGNORECASE)
-                if m_layer:
-                    lbl = m_layer.group(1).title()
-                    desc = m_layer.group(2).strip().rstrip(".")
-                    if desc:
-                        step_items.append(f"**{lbl}**: {desc}")
-                    else:
-                        step_items.append(f"**{lbl}**")
-            if len(step_items) >= 7:
-                break
-
+        # Block 4: Structural hierarchy / steps if present.
+        step_items = _extract_steps(sentences)
         if step_items:
             overview_blocks.append({
                 "heading": "Structural Hierarchy & Process Flow",
                 "content": "",
                 "bullet_points": [],
-                "numbered_points": step_items,
+                "numbered_points": step_items[:10],
             })
 
-        # 1e. Assemble Markdown representation for main_summary
-        summary_md_parts = []
-        for block in overview_blocks:
-            summary_md_parts.append(f"### {block['heading']}")
-            if block.get("content"):
-                summary_md_parts.append(block["content"])
-            if block.get("bullet_points"):
-                for b in block["bullet_points"]:
-                    summary_md_parts.append(f"• {b}")
-            if block.get("numbered_points"):
-                for idx, num_item in enumerate(block["numbered_points"], 1):
-                    summary_md_parts.append(f"{idx}. {num_item}")
-            summary_md_parts.append("")
+        main_summary = _overview_blocks_to_markdown(overview_blocks)
 
-        main_summary = "\n\n".join(p for p in summary_md_parts if p).strip()
+        # Detailed sections from heading-like lines, or chunked sentences.
+        sections = _build_sections(lines, sentences)
 
-        # ── 2. Build sections from heading-like lines ─────────────────────────
-        # Heuristic: lines that are short (<= 80 chars), title-cased, and not ending in punctuation
-        heading_indices = []
-        for i, line in enumerate(lines):
-            stripped = line.strip()
-            if (
-                5 < len(stripped) <= 80
-                and not stripped.endswith(".")
-                and not stripped.endswith(",")
-                and (stripped[0].isupper() or stripped[0].isdigit())
-                and i > 0  # skip first line (document title)
-            ):
-                heading_indices.append(i)
+        # Key points: pick the most informative sentences/lines.
+        key_points = _extract_key_points(lines, sentences, title)
 
-        sections = []
-        # Pair each heading with the lines that follow it until the next heading
-        for idx, h_idx in enumerate(heading_indices[:7]):
-            section_title = lines[h_idx].lstrip("0123456789. ").strip()
-            next_h = heading_indices[idx + 1] if idx + 1 < len(heading_indices) else len(lines)
-            body_lines = [l for l in lines[h_idx + 1 : next_h] if len(l) > 20]
-            body = " ".join(body_lines[:12])  # up to 12 lines of content per section
-            if len(body) < 30:
-                # Fallback: use sentences near this heading
-                body = " ".join(sentences[h_idx : h_idx + 5]) if h_idx < len(sentences) else ""
-            if section_title and len(body) > 20:
-                sections.append({"title": section_title, "content": body})
+        # Key terms: extract glossary entries from the document.
+        key_terms = _extract_key_terms(full_text, sentences, title)
 
-        # If no headings detected, synthesise sections from sentence groups
-        if not sections:
-            chunk_size = max(3, len(sentences) // 5)
-            generic_titles = [
-                "Introduction & Overview",
-                "Core Concepts & Definitions",
-                "Key Mechanisms & Processes",
-                "Applications & Examples",
-                "Summary & Review",
-            ]
-            for i, g_title in enumerate(generic_titles):
-                start = i * chunk_size
-                end = start + chunk_size
-                chunk = sentences[start:end]
-                if chunk:
-                    sections.append({"title": g_title, "content": " ".join(chunk)})
-
-        # ── 3. Key points (up to 12 bullets) ─────────────────────────────────
-        key_points = []
-        for line in lines[1:]:
-            if len(line) > 15 and not line.lower().startswith("page ") and len(key_points) < 12:
-                clean_p = line.lstrip("-*•0123456789. ").strip()
-                if clean_p and clean_p not in key_points and len(clean_p) > 15:
-                    key_points.append(clean_p)
-
-        # Supplement from sentences if not enough
-        if len(key_points) < 6:
-            for s in sentences:
-                clean_s = s.strip()
-                if clean_s and clean_s not in key_points and len(clean_s) > 20:
-                    key_points.append(clean_s)
-                if len(key_points) >= 10:
-                    break
-
-        if not key_points:
-            key_points = [
-                f"Core foundations and taxonomy outlined in {title}.",
-                "Standard operational mechanisms and protocol hierarchy explained.",
-                "Practical implementation considerations and system architecture covered.",
-                "Key definitions and terminology introduced for exam readiness.",
-                "Conceptual models and frameworks presented for structured understanding.",
-            ]
-
-        # ── 4. Key terms (glossary) — extract capitalised or technical words ──
-        import re as _re
-        key_terms = []
-        # Look for patterns like "TERM — definition" or "TERM: definition"
-        term_pattern = _re.compile(r'^([A-Z][A-Za-z/ ]{2,40})[:\-–—]\s*(.{15,})', _re.MULTILINE)
-        for match in term_pattern.finditer(full_text):
-            term = match.group(1).strip()
-            defn = match.group(2).strip().split(".")[0] + "."  # first sentence only
-            if len(term) < 50 and len(defn) > 15 and len(key_terms) < 12:
-                key_terms.append({"term": term, "definition": defn})
-
-        # Fallback key terms from capitalised multi-word phrases
-        if len(key_terms) < 4:
-            cap_pattern = _re.compile(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,4})\b')
-            seen_terms = {t["term"] for t in key_terms}
-            for match in cap_pattern.finditer(full_text):
-                phrase = match.group(1)
-                if phrase not in seen_terms and len(phrase) > 6:
-                    # Find the sentence containing this phrase as definition
-                    for sent in sentences:
-                        if phrase in sent and len(sent) > 20:
-                            key_terms.append({"term": phrase, "definition": sent.strip()})
-                            seen_terms.add(phrase)
-                            break
-                if len(key_terms) >= 8:
-                    break
-
-        if not key_terms:
-            key_terms = [
-                {"term": title, "definition": f"The primary subject of this study document, covering foundational principles and applications."},
-                {"term": "Protocol", "definition": "A set of rules and conventions that govern communication between systems."},
-                {"term": "Architecture", "definition": "The structured design and organisation of a system's components and their relationships."},
-            ]
-
-        # ── 5. Study tips ─────────────────────────────────────────────────────
+        # Study tips.
         study_tips = [
             f"Create a mind-map of the key sections in '{title}' to visualise relationships between topics.",
             "Use active recall: cover your notes and try to recite each section heading and its main idea.",
@@ -407,58 +223,46 @@ class FoundryClient:
         }
 
     def _generate_local_mcqs(self, filename: str, full_text: str, lines: list[str], sentences: list[str]) -> dict:
-        title = lines[0] if lines else filename.replace(".pdf", "").title()
-        mcqs = []
+        title = _infer_title(filename, lines)
+        mcqs: list[dict] = []
 
-        # Find factual / statement patterns from extracted content
-        facts = []
-        for s in sentences:
-            if any(k in s.lower() for k in ["is", "are", "has", "layer", "protocol", "model", "used", "defines", "means"]):
-                facts.append(s)
-
-        # Template 1: Based on extracted statements
-        if any("osi" in s.lower() for s in sentences) or any("7 layer" in s.lower() or "seven" in s.lower() for s in sentences):
-            mcqs.append({
-                "question": "How many layers are defined in the standard OSI reference model?",
-                "options": ["7 Layers", "4 Layers", "5 Layers", "8 Layers"],
-                "correct_answer": "7 Layers",
-                "explanation": "The OSI (Open Systems Interconnection) reference model consists of exactly 7 hierarchical layers (Physical, Data Link, Network, Transport, Session, Presentation, Application).",
-            })
-            mcqs.append({
-                "question": "In the OSI model, what is Layer 3 responsible for?",
-                "options": ["Network Layer (Routing & Logical Addressing)", "Physical Layer (Bit transmission)", "Data Link Layer (Framing & MAC)", "Transport Layer (End-to-end delivery)"],
-                "correct_answer": "Network Layer (Routing & Logical Addressing)",
-                "explanation": "Layer 1 is Physical, Layer 2 is Data Link, and Layer 3 is Network, which handles packet routing and logical IP addressing.",
-            })
-            mcqs.append({
-                "question": "Which characteristic best describes TCP (Transmission Control Protocol)?",
-                "options": ["Reliable, connection-oriented transport protocol", "Unreliable and connectionless datagram service", "Physical medium bitstream encoding", "Application presentation formatting"],
-                "correct_answer": "Reliable, connection-oriented transport protocol",
-                "explanation": "TCP is a core Internet transport layer protocol that provides reliable, ordered, and error-checked delivery of a stream of octets.",
-            })
-
-        # Dynamic generators from document sentences
-        for idx, fact in enumerate(facts):
+        # Strategy 1: definition-based questions.
+        definitions = _extract_definition_pairs(sentences)
+        random.shuffle(definitions)
+        for term, definition in definitions:
             if len(mcqs) >= 5:
                 break
-            clean_fact = fact.strip().rstrip(".")
-            if len(clean_fact) > 20 and not any(m["question"].startswith(clean_fact[:15]) for m in mcqs):
+            # Build distractors from other terms.
+            other_terms = [t for t, _ in definitions if t.lower() != term.lower()]
+            distractors = _make_distractors(term, definition, other_terms)
+            options = [definition] + distractors[:3]
+            random.shuffle(options)
+            mcqs.append({
+                "question": f"Which of the following best describes **{term}**?",
+                "options": options,
+                "correct_answer": definition,
+                "explanation": f"According to the document, **{term}** {definition.lower()}.",
+            })
+
+        # Strategy 2: factual cloze from informative sentences.
+        facts = _extract_facts(sentences)
+        random.shuffle(facts)
+        for fact in facts:
+            if len(mcqs) >= 5:
+                break
+            q, options, correct, explanation = _build_fact_mcq(fact, sentences)
+            if q:
                 mcqs.append({
-                    "question": f"According to the notes: '{clean_fact}', which statement is directly supported?",
-                    "options": [
-                        clean_fact,
-                        f"The opposite of {clean_fact[:30]}...",
-                        "It applies only under unverified hypothetical constraints",
-                        "None of the provided concepts apply to this system",
-                    ],
-                    "correct_answer": clean_fact,
-                    "explanation": f"This principle is directly stated in the study notes: '{clean_fact}'.",
+                    "question": q,
+                    "options": options,
+                    "correct_answer": correct,
+                    "explanation": explanation,
                 })
 
-        # Fill up to 5 questions with essential high-yield questions
+        # Strategy 3: generic but document-titled fallback questions.
         fallbacks = [
             {
-                "question": f"What is the primary objective of studying {title}?",
+                "question": f"What is the primary focus of '{title}' as described in the document?",
                 "options": [
                     "To understand core principles, structural models, and operational functions",
                     "To replace hardware drivers manually",
@@ -466,38 +270,10 @@ class FoundryClient:
                     "To eliminate the need for protocol standardization",
                 ],
                 "correct_answer": "To understand core principles, structural models, and operational functions",
-                "explanation": f"The primary goal of {title} is building a clear conceptual understanding of foundational architectures and operational workflows.",
+                "explanation": f"The document presents {title} as a framework for understanding foundational architectures and workflows.",
             },
             {
-                "question": "Which layer in a communication network is directly responsible for physical bit transmission?",
-                "options": ["Physical Layer (Layer 1)", "Application Layer (Layer 7)", "Session Layer (Layer 5)", "Transport Layer (Layer 4)"],
-                "correct_answer": "Physical Layer (Layer 1)",
-                "explanation": "The Physical Layer is the lowest layer (Layer 1) and handles the transmission and reception of raw unstructured data over a physical medium.",
-            },
-            {
-                "question": "What is the key difference between connection-oriented (e.g. TCP) and connectionless (e.g. UDP) protocols?",
-                "options": [
-                    "Connection-oriented establishes a session and guarantees delivery; connectionless sends packets with lower overhead and no guarantee",
-                    "Connectionless protocols are only used for physical cabling",
-                    "Connection-oriented protocols cannot transmit data across routers",
-                    "There is no difference in reliability or overhead between the two",
-                ],
-                "correct_answer": "Connection-oriented establishes a session and guarantees delivery; connectionless sends packets with lower overhead and no guarantee",
-                "explanation": "Connection-oriented protocols use handshakes and acknowledgments to ensure reliable delivery, whereas connectionless protocols prioritize low latency without retransmission guarantees.",
-            },
-            {
-                "question": "Why is modular layering important in complex systems architecture?",
-                "options": [
-                    "It allows independent design, debugging, and interoperability between different components",
-                    "It forces all systems to use the exact same operating system",
-                    "It restricts hardware from connecting to external networks",
-                    "It makes maintenance impossible without complete redesign",
-                ],
-                "correct_answer": "It allows independent design, debugging, and interoperability between different components",
-                "explanation": "Layered architecture provides modularity, abstracting internal complexities so each layer can be modified or updated without breaking other layers.",
-            },
-            {
-                "question": "When reviewing study notes for examinations, which active recall strategy is most effective?",
+                "question": f"Which active-recall strategy is most effective when studying '{title}'?",
                 "options": [
                     "Testing yourself with MCQs and explaining the reasoning behind answers",
                     "Re-reading the document passively multiple times without self-testing",
@@ -505,10 +281,9 @@ class FoundryClient:
                     "Memorizing words without understanding the underlying concepts",
                 ],
                 "correct_answer": "Testing yourself with MCQs and explaining the reasoning behind answers",
-                "explanation": "Active retrieval practice and explanation generation significantly boost long-term retention and conceptual mastery compared to passive reading.",
+                "explanation": "Active retrieval practice and explanation generation significantly boost long-term retention.",
             },
         ]
-
         for fb in fallbacks:
             if len(mcqs) >= 5:
                 break
@@ -517,15 +292,35 @@ class FoundryClient:
 
         return {
             "summary": "",
+            "overview_blocks": [],
+            "sections": [],
             "key_points": [],
+            "key_terms": [],
+            "study_tips": [],
             "mcqs": mcqs[:5],
         }
 
-    def _build_prompt(self, action: str) -> str:
+    def _build_prompt(self, action: str, filename: str, document_text: str) -> str:
+        # Truncate intelligently: keep whole sentences up to the limit.
+        trimmed_text = _truncate_text(document_text, MAX_TEXT_CHARS)
+
+        base_instruction = (
+            "You are a precise study assistant. You have been given a PDF document. "
+            "ALL of your answers MUST be based STRICTLY on the content of that document. "
+            "Do NOT use outside knowledge. If the document does not contain enough information "
+            "for a particular item, infer it conservatively from the text or mark it as not covered. "
+            "Return ONLY a valid JSON object with no markdown fences and no extra text.\n\n"
+            f"Document filename: {filename}\n"
+            "Extracted document text follows (may be truncated to fit):\n"
+            "---BEGIN DOCUMENT---\n"
+            f"{trimmed_text}\n"
+            "---END DOCUMENT---\n\n"
+        )
+
         if action == "summary":
             return (
-                "Read the attached study material thoroughly and return ONLY a valid JSON object "
-                "with no markdown fences and no extra text. Use this exact schema:\n"
+                base_instruction
+                + "Task: Produce a structured summary of the document above. Use this exact JSON schema:\n"
                 "{\n"
                 '  "overview_blocks": [\n'
                 '    {\n'
@@ -545,21 +340,28 @@ class FoundryClient:
                 '  "study_tips": ["Concrete exam/revision tip — provide at least 4"]\n'
                 "}\n\n"
                 "Requirements:\n"
-                "(1) overview_blocks must divide introductory overview into 3-4 structured blocks with dynamic headings (e.g. Overview, Why It Matters, Key Concepts, Process/Hierarchy). Keep paragraphs short (1-3 sentences). Use bullet points where list-like. Use numbered lists where steps/processes/layers exist. Bold key terms.\n"
-                "(2) sections must cover ALL major topics for Detailed Breakdown — minimum 3 sections, ideally 5-7;\n"
-                "(3) key_points must have 8-12 bullets for Core Takeaways;\n"
-                "(4) key_terms must have at least 6 glossary entries;\n"
-                "(5) study_tips must have at least 4 tips.\n"
+                "(1) Base every heading, fact, definition, and example on the document text above.\n"
+                "(2) overview_blocks must divide the introductory overview into 3-4 structured blocks with dynamic headings. Keep paragraphs short (1-3 sentences). Use bullet points where list-like. Use numbered lists where steps/processes/layers exist. Bold key terms.\n"
+                "(3) sections must cover ALL major topics for the Detailed Breakdown — minimum 3 sections, ideally 5-7.\n"
+                "(4) key_points must have 8-12 bullets for Core Takeaways.\n"
+                "(5) key_terms must have at least 6 glossary entries drawn from the document.\n"
+                "(6) study_tips must have at least 4 concrete tips.\n"
                 "Do not truncate. Cover all topics in the document."
             )
         if action == "mcqs":
             return (
-                "Read the attached study material and return ONLY a JSON object "
-                "with no markdown and no extra text:\n"
+                base_instruction
+                + "Task: Generate 5 multiple-choice questions based ONLY on the document above. "
+                "Each question must have 4 options and one clearly correct answer. "
+                "Mix easy, medium, and hard difficulty. "
+                "Return ONLY this JSON schema with no markdown and no extra text:\n"
                 '{"mcqs": [{"question": "...", "options": ["...", "...", "...", "..."], '
                 '"correct_answer": "...", "explanation": "..."}]}\n\n'
-                "Generate 5 multiple-choice questions with 4 options each. "
-                "Mix easy, medium, and hard difficulty."
+                "Requirements:\n"
+                "- Every question, correct answer, and explanation must be directly supported by the document text.\n"
+                "- Distractors must be plausible but clearly wrong based on the document.\n"
+                "- Include a mix of definitions, factual recall, and conceptual understanding.\n"
+                "- If the document is short, still produce exactly 5 questions using all available content."
             )
         raise ValueError(f"Unsupported action: {action}")
 
@@ -581,3 +383,321 @@ class FoundryClient:
         except json.JSONDecodeError as exc:
             logger.error("Could not parse JSON from response: %s", text[:500])
             raise RuntimeError(f"Agent did not return valid JSON: {text[:200]}") from exc
+
+
+# ─────────────────────────────── Helpers ───────────────────────────────
+
+
+def _extract_pdf_text(file_info: dict) -> tuple[str, str]:
+    """Decode base64 PDF and extract text with pypdf."""
+    filename = file_info.get("filename", "notes.pdf")
+    raw_b64 = file_info.get("raw_base64", "")
+    extracted_text = ""
+    if raw_b64:
+        try:
+            raw_bytes = base64.b64decode(raw_b64)
+            reader = PdfReader(io.BytesIO(raw_bytes))
+            pages_text = []
+            for p in reader.pages:
+                t = p.extract_text()
+                if t:
+                    pages_text.append(t.strip())
+            extracted_text = "\n\n".join(pages_text).strip()
+        except Exception as exc:
+            logger.warning("PDF extraction error: %s", exc)
+    return filename, extracted_text
+
+
+def _split_sentences(text: str) -> list[str]:
+    """Split text into sentences, cleaning whitespace."""
+    raw = re.split(r'(?<=[.!?])\s+|\n+', text)
+    return [re.sub(r'\s+', ' ', s).strip() for s in raw if len(s.strip()) > 8]
+
+
+def _truncate_text(text: str, max_chars: int) -> str:
+    """Trim text at sentence boundaries so we don't exceed the model context."""
+    if len(text) <= max_chars:
+        return text
+    # Find the last sentence boundary before the limit.
+    cutoff = text.rfind(". ", 0, max_chars)
+    if cutoff == -1:
+        cutoff = text.rfind("\n", 0, max_chars)
+    if cutoff == -1:
+        cutoff = max_chars
+    return text[:cutoff] + "\n[Document truncated for length.]"
+
+
+def _normalize_summary_response(res_dict: dict) -> dict:
+    """Ensure summary field is populated from overview_blocks if missing."""
+    if "overview_blocks" in res_dict and (not res_dict.get("summary") or not isinstance(res_dict["summary"], str) or res_dict["summary"].strip() == ""):
+        res_dict["summary"] = _overview_blocks_to_markdown(res_dict.get("overview_blocks", []))
+    return res_dict
+
+
+def _overview_blocks_to_markdown(blocks: list) -> str:
+    """Convert overview blocks to markdown summary string."""
+    parts = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        if block.get("heading"):
+            parts.append(f"### {block['heading']}")
+        if block.get("content"):
+            parts.append(block["content"])
+        for b in block.get("bullet_points", []):
+            parts.append(f"• {b}")
+        for idx, num_item in enumerate(block.get("numbered_points", []), 1):
+            parts.append(f"{idx}. {num_item}")
+        parts.append("")
+    return "\n\n".join(p for p in parts if p).strip()
+
+
+def _infer_title(filename: str, lines: list[str]) -> str:
+    """Infer document title from first line or filename."""
+    if lines:
+        first = lines[0].strip()
+        if 3 < len(first) < 120:
+            return first
+    return filename.replace(".pdf", "").replace("_", " ").title()
+
+
+def _chunk_sentences(sentences: list[str], chunk_size: int = 6) -> list[list[str]]:
+    """Group sentences into chunks for section/overview synthesis."""
+    return [sentences[i:i + chunk_size] for i in range(0, len(sentences), chunk_size)]
+
+
+def _extract_definitions(sentences: list[str], title: str) -> list[str]:
+    """Pull definition-style sentences from the text."""
+    bullets = []
+    title_lower = title.lower()
+    for s in sentences:
+        if s.lower().startswith("page ") or s.strip().lower() == title_lower:
+            continue
+        if re.search(r'\blayer\s*\d+|\bstep\s*\d+', s, re.I):
+            continue
+        m_def = re.match(r'^(?:The\s+)?([A-Za-z0-9\s\-/]{2,35})\s+(is a|is an|is|has|defines)\s+(.*)', s, re.IGNORECASE)
+        if m_def:
+            term_name = m_def.group(1).strip()
+            verb = m_def.group(2).strip().lower()
+            term_desc = m_def.group(3).strip().rstrip(".")
+            if 4 < len(term_desc) < 180 and term_name.lower() != title_lower:
+                prefix = f"{verb.capitalize()} " if verb in ["has", "defines"] else ""
+                bullets.append(f"**{term_name}**: {prefix}{term_desc.capitalize()}.")
+        elif any(k in s.lower() for k in [" is a ", " is an ", " refers to ", " defined as "]):
+            parts = re.split(r'\b(is a|is an|refers to|defined as)\b', s, maxsplit=1, flags=re.IGNORECASE)
+            if len(parts) == 3 and 3 < len(parts[0].strip()) < 40:
+                bullets.append(f"**{parts[0].strip()}**: {parts[1].capitalize()} {parts[2].strip().rstrip('.')}.")
+        if len(bullets) >= 6:
+            break
+    return bullets
+
+
+def _extract_steps(sentences: list[str]) -> list[str]:
+    """Look for numbered steps, layers, phases, or stages."""
+    items = []
+    for s in sentences:
+        clauses = re.split(r'[,;]|\band\b', s) if any(k in s.lower() for k in ["layer", "step", "phase", "stage"]) else [s]
+        for cl in clauses:
+            m = re.search(r'\b(layer\s*\d+|step\s*\d+|phase\s*\d+|stage\s*\d+)\b\s*(?:is|:|-)?\s*(.*?)$', cl, re.IGNORECASE)
+            if m:
+                lbl = m.group(1).title()
+                desc = m.group(2).strip().rstrip(".")
+                items.append(f"**{lbl}**: {desc}" if desc else f"**{lbl}**")
+            if len(items) >= 10:
+                break
+        if len(items) >= 10:
+            break
+    return items
+
+
+def _build_sections(lines: list[str], sentences: list[str]) -> list[dict]:
+    """Build detailed sections from headings or sentence chunks."""
+    heading_indices = []
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if (
+            5 < len(stripped) <= 80
+            and not stripped.endswith(".")
+            and not stripped.endswith(",")
+            and (stripped[0].isupper() or stripped[0].isdigit())
+            and i > 0
+        ):
+            heading_indices.append(i)
+
+    sections = []
+    for idx, h_idx in enumerate(heading_indices[:7]):
+        section_title = lines[h_idx].lstrip("0123456789. ").strip()
+        next_h = heading_indices[idx + 1] if idx + 1 < len(heading_indices) else len(lines)
+        body_lines = [l for l in lines[h_idx + 1 : next_h] if len(l) > 20]
+        body = " ".join(body_lines[:12])
+        if len(body) < 30:
+            body = " ".join(sentences[h_idx : h_idx + 5]) if h_idx < len(sentences) else ""
+        if section_title and len(body) > 20:
+            sections.append({"title": section_title, "content": body})
+
+    if not sections:
+        chunks = _chunk_sentences(sentences, chunk_size=max(3, len(sentences) // 5))
+        generic_titles = [
+            "Introduction & Overview",
+            "Core Concepts & Definitions",
+            "Key Mechanisms & Processes",
+            "Applications & Examples",
+            "Summary & Review",
+        ]
+        for i, g_title in enumerate(generic_titles):
+            if i < len(chunks) and chunks[i]:
+                sections.append({"title": g_title, "content": " ".join(chunks[i])})
+
+    return sections
+
+
+def _extract_key_points(lines: list[str], sentences: list[str], title: str) -> list[str]:
+    """Extract concise key takeaways from the document."""
+    key_points = []
+    for line in lines[1:]:
+        if len(line) > 15 and not line.lower().startswith("page "):
+            clean_p = line.lstrip("-*•0123456789. ").strip()
+            if clean_p and clean_p not in key_points and len(clean_p) > 15:
+                key_points.append(clean_p)
+        if len(key_points) >= 12:
+            break
+
+    if len(key_points) < 6:
+        for s in sentences:
+            clean_s = s.strip()
+            if clean_s and clean_s not in key_points and len(clean_s) > 20:
+                key_points.append(clean_s)
+            if len(key_points) >= 10:
+                break
+
+    if not key_points:
+        key_points = [
+            f"Core foundations and taxonomy outlined in {title}.",
+            "Standard operational mechanisms and protocol hierarchy explained.",
+            "Practical implementation considerations and system architecture covered.",
+            "Key definitions and terminology introduced for exam readiness.",
+            "Conceptual models and frameworks presented for structured understanding.",
+        ]
+    return key_points
+
+
+def _extract_key_terms(full_text: str, sentences: list[str], title: str) -> list[dict]:
+    """Extract glossary terms and definitions from the document."""
+    key_terms = []
+    term_pattern = re.compile(r'^([A-Z][A-Za-z/ ]{2,40})[:\-–—]\s*(.{15,})', re.MULTILINE)
+    for match in term_pattern.finditer(full_text):
+        term = match.group(1).strip()
+        defn = match.group(2).strip().split(".")[0] + "."
+        if len(term) < 50 and len(defn) > 15 and len(key_terms) < 12:
+            key_terms.append({"term": term, "definition": defn})
+
+    if len(key_terms) < 4:
+        cap_pattern = re.compile(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,4})\b')
+        seen_terms = {t["term"] for t in key_terms}
+        for match in cap_pattern.finditer(full_text):
+            phrase = match.group(1)
+            if phrase not in seen_terms and len(phrase) > 6:
+                for sent in sentences:
+                    if phrase in sent and len(sent) > 20:
+                        key_terms.append({"term": phrase, "definition": sent.strip()})
+                        seen_terms.add(phrase)
+                        break
+            if len(key_terms) >= 8:
+                break
+
+    if not key_terms:
+        key_terms = [
+            {"term": title, "definition": "The primary subject of this study document, covering foundational principles and applications."},
+            {"term": "Protocol", "definition": "A set of rules and conventions that govern communication between systems."},
+            {"term": "Architecture", "definition": "The structured design and organisation of a system's components and their relationships."},
+        ]
+    return key_terms
+
+
+def _extract_definition_pairs(sentences: list[str]) -> list[tuple[str, str]]:
+    """Return (term, definition) pairs for MCQ distractor generation."""
+    pairs = []
+    seen = set()
+    for s in sentences:
+        m = re.match(r'^(?:The\s+)?([A-Za-z0-9\s\-/]{2,35})\s+(is a|is an|is|has|defines)\s+(.*)', s, re.IGNORECASE)
+        if m:
+            term = m.group(1).strip()
+            desc = m.group(3).strip().rstrip(".")
+            if term.lower() not in seen and 10 < len(desc) < 200:
+                pairs.append((term, desc))
+                seen.add(term.lower())
+        elif " is a " in s.lower() or " is an " in s.lower():
+            parts = re.split(r'\b(is a|is an)\b', s, maxsplit=1, flags=re.IGNORECASE)
+            if len(parts) == 3 and 3 < len(parts[0].strip()) < 40:
+                term = parts[0].strip()
+                desc = f"{parts[1]} {parts[2].strip().rstrip('.')}"
+                if term.lower() not in seen and 10 < len(desc) < 200:
+                    pairs.append((term, desc))
+                    seen.add(term.lower())
+    return pairs
+
+
+def _make_distractors(term: str, definition: str, other_terms: list[str]) -> list[str]:
+    """Build plausible wrong definitions for a term."""
+    distractors = []
+    # Use definitions of other terms as distractors.
+    for other in other_terms:
+        if other.lower() != term.lower() and len(distractors) < 3:
+            distractors.append(f"is {other.lower()} rather than {term.lower()}")
+    # Generic distractors.
+    distractors += [
+        f"has no relationship with {term.lower()}",
+        "is not mentioned or described in the document",
+        "is a process that occurs independently of the document topic",
+    ]
+    return distractors
+
+
+def _extract_facts(sentences: list[str]) -> list[str]:
+    """Pull factual statements that can be turned into MCQs."""
+    facts = []
+    fact_keywords = ["is", "are", "has", "have", "defines", "means", "consists", "contains", "requires", "uses"]
+    for s in sentences:
+        s_low = s.lower()
+        if any(k in s_low for k in fact_keywords) and len(s) > 25:
+            facts.append(s)
+    return facts
+
+
+def _build_fact_mcq(fact: str, sentences: list[str]) -> tuple[Optional[str], list[str], str, str]:
+    """Turn a factual sentence into a 4-option MCQ."""
+    # Try to find a numeric or named entity to replace.
+    match = re.search(r'\b(\d+)\b', fact)
+    if match:
+        target = match.group(1)
+        question = re.sub(r'\b' + re.escape(target) + r'\b', "______", fact, count=1)
+        correct = target
+        # Collect other numbers from the document as distractors.
+        other_numbers = list(set(re.findall(r'\b\d+\b', " ".join(sentences))))
+        other_numbers = [n for n in other_numbers if n != target]
+        random.shuffle(other_numbers)
+        options = [correct] + other_numbers[:3]
+        while len(options) < 4:
+            options.append(str(random.randint(1, 20)))
+        random.shuffle(options)
+        return question, options, correct, f"The document states: {fact}"
+
+    # Try to blank out the last noun phrase / key term.
+    words = fact.split()
+    if len(words) >= 5:
+        target = words[-1].rstrip(".")
+        if target.lower() in {"it", "they", "them", "this", "that"}:
+            target = words[-2] if len(words) >= 6 else target
+        question = " ".join(words[:-1]) + " ______."
+        correct = target
+        # Pick distractors from other ending words in sentences.
+        other_ends = [s.split()[-1].rstrip(".") for s in sentences if s != fact and len(s.split()) > 3]
+        other_ends = [w for w in other_ends if w.lower() != correct.lower() and len(w) > 2]
+        random.shuffle(other_ends)
+        options = [correct] + other_ends[:3]
+        while len(options) < 4:
+            options.append("unknown")
+        random.shuffle(options)
+        return question, options, correct, f"The document states: {fact}"
+
+    return None, [], "", ""

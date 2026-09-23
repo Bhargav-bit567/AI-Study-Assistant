@@ -39,3 +39,7 @@ services:
         sync: false
       - key: SMTP_LOGIN_NOTIFICATION_ENABLED
         sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: RESEND_FROM_EMAIL
+        sync: false

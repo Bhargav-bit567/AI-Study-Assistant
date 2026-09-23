@@ -346,9 +346,11 @@ def save_result(
     mcqs = mcqs or []
 
     if IS_SUPABASE_CONFIGURED:
+        from supabase import create_client
+        client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+
+        # Try full schema insert first (new columns).
         try:
-            from supabase import create_client
-            client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
             res = client.table("results").insert({
                 "user_id": user_id,
                 "document_id": document_id,
@@ -363,7 +365,24 @@ def save_result(
             }).execute()
             return res.data[0]
         except Exception as e:
-            logger.warning("Supabase save_result failed, using local DB: %s", e)
+            err_msg = str(e).lower()
+            # If the new columns don't exist yet, fall back to the original schema.
+            if "overview_blocks" in err_msg or "sections" in err_msg or "key_terms" in err_msg or "study_tips" in err_msg:
+                logger.warning("Supabase results table missing new columns; falling back to original schema insert: %s", e)
+                try:
+                    res = client.table("results").insert({
+                        "user_id": user_id,
+                        "document_id": document_id,
+                        "action": action,
+                        "summary": summary,
+                        "key_points": key_points,
+                        "mcqs": mcqs,
+                    }).execute()
+                    return res.data[0]
+                except Exception as e2:
+                    logger.warning("Supabase original-schema save_result failed, using local DB: %s", e2)
+            else:
+                logger.warning("Supabase save_result failed, using local DB: %s", e)
 
     with _get_db() as conn:
         res_id = str(uuid.uuid4())
