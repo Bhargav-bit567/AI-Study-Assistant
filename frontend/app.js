@@ -778,3 +778,24 @@ document.addEventListener("DOMContentLoaded", () => {
 
   btnResetQuiz.addEventListener("click", () => renderMCQs({ mcqs: currentMCQs }));
 });
+
+// ── Star field generation ─────────────────────────────────────────────────
+(function generateStars() {
+  const layer = document.getElementById("starsLayer");
+  if (!layer) return;
+  const count = 120;
+  for (let i = 0; i < count; i++) {
+    const star = document.createElement("div");
+    star.className = "star";
+    star.style.cssText = [
+      `left:${Math.random() * 100}%`,
+      `top:${Math.random() * 100}%`,
+      `--d:${(Math.random() * 5 + 2.5).toFixed(1)}s`,
+      `--delay:-${(Math.random() * 8).toFixed(1)}s`,
+      `--max-op:${(Math.random() * 0.55 + 0.2).toFixed(2)}`,
+      `width:${Math.random() < 0.15 ? 3 : 2}px`,
+      `height:${Math.random() < 0.15 ? 3 : 2}px`,
+    ].join(";");
+    layer.appendChild(star);
+  }
+})();
